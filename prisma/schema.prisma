@@ -1,0 +1,79 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id             String          @id @default(cuid())
+  email          String          @unique
+  password       String
+  username       String          @unique
+  name           String?
+  pin            String          // 6-digit PIN (bcrypt hash)
+  plan           Plan            @default(FREE)
+  customDomain   String?         @unique
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  cloudAccounts  CloudAccount[]
+  guestLinks     GuestLink[]
+  accessLogs     AccessLog[]
+  trustedDevices TrustedDevice[]
+}
+
+model CloudAccount {
+  id           String    @id @default(cuid())
+  userId       String
+  provider     Provider
+  accessToken  String    // AES-256 encrypted
+  refreshToken String    // AES-256 encrypted
+  expiresAt    DateTime?
+  email        String?
+  createdAt    DateTime  @default(now())
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+}
+
+model GuestLink {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique @default(cuid())
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AccessLog {
+  id        String   @id @default(cuid())
+  userId    String
+  ip        String
+  country   String?
+  city      String?
+  device    String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model TrustedDevice {
+  id         String   @id @default(cuid())
+  userId     String
+  token      String   @unique
+  deviceName String?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+enum Provider {
+  GOOGLE_DRIVE
+  ONEDRIVE
+  ICLOUD
+}
+
+enum Plan {
+  FREE
+  PRO
+}
