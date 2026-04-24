@@ -31,8 +31,8 @@ export function getSubdomainValidationError(value: string) {
     return "Subdomain is required";
   }
 
-  if (normalized.length < 3 || normalized.length > 20) {
-    return "Subdomain must be 3-20 characters";
+  if (normalized.length < 3 || normalized.length > 32) {
+    return "Subdomain must be 3-32 characters";
   }
 
   if (!SUBDOMAIN_PATTERN.test(normalized)) {

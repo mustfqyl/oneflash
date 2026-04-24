@@ -8,6 +8,7 @@ import {
   createRateLimitResponse,
   ensureTrustedOrigin,
 } from "@/lib/security";
+import { addSubdomain, removeSubdomain } from "@/lib/vercel";
 
 export async function POST(req: NextRequest) {
   try {
@@ -25,6 +26,7 @@ export async function POST(req: NextRequest) {
       where: { email: session.user.email },
       select: {
         id: true,
+        customDomain: true,
       },
     });
     if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
@@ -66,7 +68,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Subdomain already taken" }, { status: 409 });
     }
 
-    // Update
+    // Update Vercel
+    if (user.customDomain) {
+      await removeSubdomain(user.customDomain);
+    }
+    await addSubdomain(formatted);
+
+    // Update DB
     await prisma.user.update({
       where: { id: user.id },
       data: { customDomain: formatted },
