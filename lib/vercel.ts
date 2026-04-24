@@ -8,13 +8,13 @@ export async function addSubdomain(subdomain: string) {
   }
 
   try {
-    const res = await fetch(\`https://api.vercel.com/v10/projects/\${projectId}/domains\`, {
+    const res = await fetch(`https://api.vercel.com/v10/projects/${projectId}/domains`, {
       method: "POST",
       headers: {
-        "Authorization": \`Bearer \${token}\`,
+        "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ name: \`\${subdomain}.oneflash.one\` }),
+      body: JSON.stringify({ name: `${subdomain}.oneflash.one` }),
     });
 
     if (!res.ok) {
@@ -41,10 +41,10 @@ export async function removeSubdomain(subdomain: string) {
   }
 
   try {
-    const res = await fetch(\`https://api.vercel.com/v10/projects/\${projectId}/domains/\${subdomain}.oneflash.one\`, {
+    const res = await fetch(`https://api.vercel.com/v10/projects/${projectId}/domains/${subdomain}.oneflash.one`, {
       method: "DELETE",
       headers: {
-        "Authorization": \`Bearer \${token}\`,
+        "Authorization": `Bearer ${token}`,
       },
     });
 
