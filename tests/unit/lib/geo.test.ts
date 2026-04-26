@@ -5,7 +5,7 @@ describe("geo helpers", () => {
   it("uses proxy geo headers when available", async () => {
     const headers = new Headers({
       "cf-ipcountry": "TR",
-      "x-vercel-ip-city": "Istanbul",
+      "cf-ipcity": "Istanbul",
     });
 
     expect(getGeoFromHeaders(headers)).toEqual({

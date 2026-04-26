@@ -67,7 +67,6 @@ export function getSubdomainFromHost(host: string | null, rootDomain = getRootDo
     !normalizedHost ||
     normalizedHost === "localhost" ||
     normalizedHost.endsWith(".localhost") ||
-    normalizedHost.endsWith(".vercel.app") ||
     normalizedHost === rootDomain ||
     normalizedHost === `www.${rootDomain}` ||
     !normalizedHost.endsWith(`.${rootDomain}`)

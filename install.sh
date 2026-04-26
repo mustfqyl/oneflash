@@ -323,8 +323,6 @@ write_app_env_file() {
     write_dotenv_line SMTP_USER "$SMTP_USER"
     write_dotenv_line SMTP_PASS "$SMTP_PASS"
     write_dotenv_line FROM_EMAIL "$FROM_EMAIL"
-    write_dotenv_line VERCEL_TOKEN "$VERCEL_TOKEN"
-    write_dotenv_line VERCEL_PROJECT_ID "$VERCEL_PROJECT_ID"
     write_dotenv_line DEPLOYMENT_VERSION "$DEPLOYMENT_VERSION"
   } >>"$APP_ENV_FILE"
   chmod 600 "$APP_ENV_FILE"
@@ -879,14 +877,6 @@ collect_optional_integrations() {
     SMTP_PASS=""
   fi
 
-  prompt_yes_no ENABLE_VERCEL "Vercel entegrasyonu girilsin mi?" "${ENABLE_VERCEL:-$(enabled_by_any_value "${VERCEL_TOKEN:-}" "${VERCEL_PROJECT_ID:-}")}"
-  if [ "$ENABLE_VERCEL" = "yes" ]; then
-    prompt_secret VERCEL_TOKEN "Vercel token" "${VERCEL_TOKEN:-}"
-    prompt_required VERCEL_PROJECT_ID "Vercel project id" "${VERCEL_PROJECT_ID:-}"
-  else
-    VERCEL_TOKEN=""
-    VERCEL_PROJECT_ID=""
-  fi
 }
 
 parse_args() {

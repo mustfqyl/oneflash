@@ -13,7 +13,7 @@ describe("subdomain utilities", () => {
   it("extracts valid scoped subdomains and ignores preview or root hosts", () => {
     expect(getSubdomainFromHost("musti.oneflash.one")).toBe("musti");
     expect(getSubdomainFromHost("www.oneflash.one")).toBeNull();
-    expect(getSubdomainFromHost("musti.vercel.app")).toBeNull();
+    expect(getSubdomainFromHost("musti.preview.oneflash.one")).toBeNull();
   });
 
   it("builds subdomain URLs for both local and production roots", () => {

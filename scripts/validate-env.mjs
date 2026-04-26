@@ -22,10 +22,6 @@ const optionalGroups = [
     name: "SMTP",
     vars: ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS"],
   },
-  {
-    name: "Vercel integration",
-    vars: ["VERCEL_TOKEN", "VERCEL_PROJECT_ID"],
-  },
 ];
 
 function readEnv(name) {

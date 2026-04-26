@@ -23,12 +23,11 @@ Start from [.env.example](./.env.example) and configure at least:
 - `ENCRYPTION_KEY`
 - `ADMIN_EMAILS` or `ADMIN_EMAIL`
 
-Optional integrations must be configured as complete pairs:
+Optional integrations must be configured as complete sets:
 
 - Google OAuth: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
 - Microsoft OAuth: `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`
 - SMTP: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
-- Vercel integration: `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`
 
 ## Docker / VPS
 
@@ -48,7 +47,7 @@ chmod +x install.sh
 
 What the installer does:
 
-- asks for the root domain, admin emails, database mode, Cloudflare token, and optional integrations
+- asks for the root domain, admin emails, database mode, Cloudflare token, and optional integrations that are actually enabled in the app
 - generates production env files under `deploy/runtime/`
 - creates or updates the apex and wildcard DNS records in Cloudflare
 - provisions Docker if needed

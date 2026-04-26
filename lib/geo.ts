@@ -42,11 +42,8 @@ function isLocalOrPrivateIp(ip: string) {
 export function getGeoFromHeaders(headersSource: HeaderSource): GeoResult | null {
   const country =
     normalizeGeoValue(getHeaderValue(headersSource, "cf-ipcountry")) ||
-    normalizeGeoValue(getHeaderValue(headersSource, "x-vercel-ip-country")) ||
     normalizeGeoValue(getHeaderValue(headersSource, "cloudfront-viewer-country"));
-  const city =
-    normalizeGeoValue(getHeaderValue(headersSource, "x-vercel-ip-city")) ||
-    normalizeGeoValue(getHeaderValue(headersSource, "cf-ipcity"));
+  const city = normalizeGeoValue(getHeaderValue(headersSource, "cf-ipcity"));
 
   if (!country && !city) {
     return null;
