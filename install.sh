@@ -418,7 +418,7 @@ EOF
   setup:
     build:
       context: ../..
-      dockerfile: ../../Dockerfile
+      dockerfile: Dockerfile
       target: tools
     working_dir: /app
     env_file:
@@ -446,7 +446,7 @@ EOF
   app:
     build:
       context: ../..
-      dockerfile: ../../Dockerfile
+      dockerfile: Dockerfile
     restart: unless-stopped
     init: true
     env_file:
