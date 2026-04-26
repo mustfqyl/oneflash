@@ -18,6 +18,10 @@ import {
   duplicateGoogleDriveFile,
   moveGoogleDriveFile,
 } from "@/lib/google-drive";
+import {
+  buildGoogleBrowserPreviewUrl,
+  getGooglePreviewMimeType,
+} from "@/lib/cloud-preview";
 import { ensureTrustedOrigin } from "@/lib/security";
 import { getItemNameValidationError } from "@/lib/validation";
 
@@ -27,11 +31,27 @@ type GoogleAccountSummary = {
 };
 
 function toResponseFile(file: DriveFile, account: GoogleAccountSummary) {
+  const { webViewLink, ...rest } = file;
+  const scopedId = encodeScopedCloudItemId(account.id, file.id);
+  const previewMimeType = getGooglePreviewMimeType(file.mimeType);
   return {
-    ...file,
-    id: encodeScopedCloudItemId(account.id, file.id),
+    ...rest,
+    id: scopedId,
     accountId: account.id,
     accountEmail: account.email,
+    directUrl: null,
+    previewUrl:
+      file.mimeType === "application/vnd.google-apps.folder"
+        ? null
+        : buildGoogleBrowserPreviewUrl({
+            fileId: scopedId,
+            accountId: account.id,
+            mimeType: file.mimeType,
+          }),
+    previewMimeType,
+    downloadUrl: null,
+    viewerUrl: webViewLink || null,
+    thumbnailUrl: null,
   };
 }
 

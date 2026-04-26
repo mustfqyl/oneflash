@@ -77,7 +77,7 @@ export default function SignOutDialog({
         throw signOutResult.reason;
       }
 
-      router.replace("/login");
+      router.replace("/");
     } catch {
       onErrorChange("Sign out failed. Please try again.");
       onPendingChange(false);
@@ -85,7 +85,7 @@ export default function SignOutDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay px-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-overlay px-4 backdrop-blur-sm">
       <button
         aria-label="Close sign out dialog"
         className="absolute inset-0 cursor-default"

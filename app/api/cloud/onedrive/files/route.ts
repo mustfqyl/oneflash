@@ -27,11 +27,18 @@ type OneDriveAccountSummary = {
 };
 
 function toResponseFile(file: OneDriveItem, account: OneDriveAccountSummary) {
+  const { downloadUrl, ...rest } = file;
   return {
-    ...file,
+    ...rest,
     id: encodeScopedCloudItemId(account.id, file.id),
     accountId: account.id,
     accountEmail: account.email,
+    directUrl: downloadUrl || null,
+    previewUrl: downloadUrl || null,
+    previewMimeType: null,
+    downloadUrl: downloadUrl || null,
+    viewerUrl: null,
+    thumbnailUrl: null,
   };
 }
 

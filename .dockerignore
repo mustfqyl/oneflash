@@ -1,0 +1,15 @@
+.git
+.next
+coverage
+node_modules
+npm-debug.log*
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+/deploy/runtime
+tests
+playwright-report
+test-results
+tsconfig.tsbuildinfo

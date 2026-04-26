@@ -73,7 +73,10 @@ export async function PATCH(req: NextRequest) {
 
     const { name, username } = await req.json();
 
-    const dataToUpdate: any = {};
+    const dataToUpdate: {
+      name?: string;
+      username?: string;
+    } = {};
 
     if (typeof name === "string") {
       const nameError = getDisplayNameValidationError(name);

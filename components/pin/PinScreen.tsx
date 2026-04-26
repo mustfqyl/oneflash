@@ -5,10 +5,15 @@ import { motion, useAnimation } from "framer-motion";
 
 interface PinScreenProps {
   subdomain: string;
+  rootDomain: string;
   onSuccess: () => void;
 }
 
-export default function PinScreen({ subdomain, onSuccess }: PinScreenProps) {
+export default function PinScreen({
+  subdomain,
+  rootDomain,
+  onSuccess,
+}: PinScreenProps) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
   const [lockedUntil, setLockedUntil] = useState<number | null>(null);
@@ -147,7 +152,7 @@ export default function PinScreen({ subdomain, onSuccess }: PinScreenProps) {
           oneflash
         </h1>
         <p className="font-medium text-muted">
-          {subdomain}.oneflash.one
+          {subdomain}.{rootDomain}
         </p>
       </div>
 

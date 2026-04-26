@@ -20,7 +20,7 @@ describe("RegisterPage", () => {
   it("blocks submit when pin is not six digits", async () => {
     render(<RegisterPage />);
 
-    await userEvent.type(screen.getByLabelText(/desired subdomain/i), "musti");
+    await userEvent.type(screen.getByLabelText(/^username$/i), "musti");
     await userEvent.type(screen.getByLabelText(/email address/i), "user@example.com");
     await userEvent.type(screen.getByLabelText(/^password$/i), "secret");
     await userEvent.type(screen.getByLabelText(/6-digit access pin/i), "123");
@@ -39,7 +39,7 @@ describe("RegisterPage", () => {
 
     render(<RegisterPage />);
 
-    await userEvent.type(screen.getByLabelText(/desired subdomain/i), "musti");
+    await userEvent.type(screen.getByLabelText(/^username$/i), "musti");
     await userEvent.type(screen.getByLabelText(/email address/i), "user@example.com");
     await userEvent.type(screen.getByLabelText(/^password$/i), "Secret1234");
     await userEvent.type(screen.getByLabelText(/6-digit access pin/i), "123456");
@@ -67,7 +67,7 @@ describe("RegisterPage", () => {
 
     render(<RegisterPage />);
 
-    await userEvent.type(screen.getByLabelText(/desired subdomain/i), "musti");
+    await userEvent.type(screen.getByLabelText(/^username$/i), "musti");
     await userEvent.type(screen.getByLabelText(/email address/i), "user@example.com");
     await userEvent.type(screen.getByLabelText(/^password$/i), "Secret1234");
     await userEvent.type(screen.getByLabelText(/6-digit access pin/i), "123456");
@@ -79,7 +79,7 @@ describe("RegisterPage", () => {
   it("blocks submit when password does not meet the policy", async () => {
     render(<RegisterPage />);
 
-    await userEvent.type(screen.getByLabelText(/desired subdomain/i), "musti");
+    await userEvent.type(screen.getByLabelText(/^username$/i), "musti");
     await userEvent.type(screen.getByLabelText(/email address/i), "user@example.com");
     await userEvent.type(screen.getByLabelText(/^password$/i), "alllowercase12");
     await userEvent.type(screen.getByLabelText(/6-digit access pin/i), "123456");

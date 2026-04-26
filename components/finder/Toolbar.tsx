@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  Bars3Icon,
   ArrowPathIcon,
-  ChevronLeftIcon, 
+  ChevronLeftIcon,
   ChevronRightIcon as BreadcrumbChevronRightIcon,
   ChevronRightIcon, 
   Squares2X2Icon, 
@@ -29,7 +30,6 @@ import {
   type FinderItemScale,
   type FinderItemDensity,
   type SortBy,
-  type SortDirection,
   useCloud,
 } from "./CloudContext";
 
@@ -52,7 +52,11 @@ const SORT_OPTIONS: { value: SortBy; label: string }[] = [
   { value: "kind", label: "Kind" },
 ];
 
-export default function Toolbar() {
+export default function Toolbar({
+  onOpenSidebar,
+}: {
+  onOpenSidebar?: () => void;
+}) {
   const {
     currentLocationProvider,
     currentLocationAccountId,
@@ -242,6 +246,16 @@ export default function Toolbar() {
     <>
     <div className="motion-enter motion-enter-delay-1 relative z-[60] flex h-14 items-center justify-between border-b border-border bg-window-chrome px-4 backdrop-blur-md">
       <div className="flex items-center gap-1">
+        {onOpenSidebar ? (
+          <button
+            type="button"
+            aria-label="Open sidebar"
+            onClick={onOpenSidebar}
+            className="motion-press mr-1 rounded-md p-1.5 text-muted transition-colors hover:bg-hover hover:text-foreground md:hidden"
+          >
+            <Bars3Icon className="h-5 w-5" />
+          </button>
+        ) : null}
         <button 
           aria-label="Go back"
           className="motion-press rounded-md p-1.5 text-muted transition-colors hover:bg-hover hover:text-foreground disabled:opacity-30"
@@ -500,7 +514,7 @@ export default function Toolbar() {
       </div>
     </div>
       {renameDialogOpen && primarySelection && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay px-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-overlay px-4 backdrop-blur-sm">
           <div
             aria-busy={renameSubmitting}
             aria-modal="true"
@@ -537,7 +551,7 @@ export default function Toolbar() {
         </div>
       )}
       {folderDialogOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay px-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-overlay px-4 backdrop-blur-sm">
           <div
             aria-busy={folderSubmitting}
             aria-modal="true"
@@ -599,7 +613,7 @@ export default function Toolbar() {
         onSelect={handleTargetSelect}
       />
       {deleteDialogOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay px-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-overlay px-4 backdrop-blur-sm">
           <div
             aria-busy={deleteSubmitting}
             aria-modal="true"

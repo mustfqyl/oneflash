@@ -19,18 +19,18 @@ export async function proxy(req: NextRequest) {
     });
 
     if (user) {
-      // İlgili kullanıcının dosya yöneticisi sayfasına yönlendir
-      const res = NextResponse.rewrite(new URL('/files', req.url));
-      res.headers.set("x-subdomain", subdomain);
-      return res;
+      return NextResponse.next();
     }
+
+    const apexUrl = req.nextUrl.clone();
+    apexUrl.hostname = rootDomain;
+
+    return NextResponse.redirect(apexUrl);
   } catch (error) {
     console.error("Proxy DB Error:", error);
   }
 
-  const res = NextResponse.next();
-  res.headers.set("x-subdomain", subdomain);
-  return res;
+  return NextResponse.next();
 }
 
 export const config = {

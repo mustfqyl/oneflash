@@ -198,6 +198,7 @@ export interface OneDriveItem {
   file?: { mimeType: string };
   webUrl?: string;
   parentReference?: { id: string; path: string };
+  downloadUrl?: string | null;
 }
 
 export async function listOneDriveFiles(
@@ -205,20 +206,34 @@ export async function listOneDriveFiles(
   folderId: string = "root",
   query?: string
 ): Promise<OneDriveItem[]> {
+  const select =
+    "$select=id,name,size,lastModifiedDateTime,folder,file,webUrl,@microsoft.graph.downloadUrl";
   let url: string;
   if (query) {
-    url = `${GRAPH_API_BASE}/me/drive/search(q='${encodeURIComponent(query)}')`;
+    url = `${GRAPH_API_BASE}/me/drive/search(q='${encodeURIComponent(query)}')?${select}&$top=100`;
   } else if (folderId === "root") {
-    url = `${GRAPH_API_BASE}/me/drive/root/children?$orderby=name&$top=100`;
+    url = `${GRAPH_API_BASE}/me/drive/root/children?${select}&$orderby=name&$top=100`;
   } else {
-    url = `${GRAPH_API_BASE}/me/drive/items/${folderId}/children?$orderby=name&$top=100`;
+    url = `${GRAPH_API_BASE}/me/drive/items/${folderId}/children?${select}&$orderby=name&$top=100`;
   }
 
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  const data = await res.json();
-  return data.value || [];
+  const data = (await res.json().catch(() => null)) as
+    | {
+        value?: Array<
+          OneDriveItem & {
+            "@microsoft.graph.downloadUrl"?: string;
+          }
+        >;
+      }
+    | null;
+
+  return (data?.value || []).map((item) => ({
+    ...item,
+    downloadUrl: item["@microsoft.graph.downloadUrl"] || null,
+  }));
 }
 
 export async function uploadToOneDrive(
@@ -402,6 +417,30 @@ export async function downloadOneDriveFile(
     headers,
     redirect: "follow",
   });
+}
+
+export async function getOneDriveDirectDownloadUrl(
+  accessToken: string,
+  fileId: string
+): Promise<string | null> {
+  const response = await fetch(
+    `${GRAPH_API_BASE}/me/drive/items/${fileId}?$select=id,@microsoft.graph.downloadUrl`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error("Failed to retrieve OneDrive download URL");
+  }
+
+  const data = (await response.json().catch(() => null)) as
+    | { "@microsoft.graph.downloadUrl"?: string }
+    | null;
+
+  return data?.["@microsoft.graph.downloadUrl"] || null;
 }
 
 export { encrypt as encryptToken };

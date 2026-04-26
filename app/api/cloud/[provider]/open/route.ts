@@ -7,52 +7,45 @@ import {
   resolveCloudAccount,
 } from "@/lib/cloud-accounts";
 import {
+  acquireConcurrencySlot,
+  checkRateLimit,
+  createBusyResponse,
+  createRateLimitResponse,
+  getClientIp,
+} from "@/lib/security";
+import {
   downloadGoogleDriveFile,
   exportGoogleDriveFile,
+  getGoogleDriveBrowserOpenUrl,
+  getGoogleDriveFileMetadata,
+  GOOGLE_DOWNLOAD_EXPORTS,
+  GOOGLE_PREVIEW_EXPORTS,
 } from "@/lib/google-drive";
-import { downloadOneDriveFile } from "@/lib/onedrive";
+import {
+  downloadOneDriveFile,
+  getOneDriveDirectDownloadUrl,
+} from "@/lib/onedrive";
 import { resolveFileMimeType } from "@/lib/file-mime";
 
-const GOOGLE_PREVIEW_EXPORTS: Record<string, { mimeType: string; extension: string }> = {
-  "application/vnd.google-apps.document": {
-    mimeType: "application/pdf",
-    extension: "pdf",
-  },
-  "application/vnd.google-apps.spreadsheet": {
-    mimeType: "application/pdf",
-    extension: "pdf",
-  },
-  "application/vnd.google-apps.presentation": {
-    mimeType: "application/pdf",
-    extension: "pdf",
-  },
-  "application/vnd.google-apps.drawing": {
-    mimeType: "application/pdf",
-    extension: "pdf",
-  },
-};
+const PREVIEW_CACHE_CONTROL = "private, max-age=300, stale-while-revalidate=900";
+const TRANSFER_CONCURRENCY_LIMITS = {
+  preview: 32,
+  download: 12,
+} as const;
 
-const GOOGLE_DOWNLOAD_EXPORTS: Record<string, { mimeType: string; extension: string }> = {
-  "application/vnd.google-apps.document": {
-    mimeType:
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    extension: "docx",
-  },
-  "application/vnd.google-apps.spreadsheet": {
-    mimeType:
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    extension: "xlsx",
-  },
-  "application/vnd.google-apps.presentation": {
-    mimeType:
-      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    extension: "pptx",
-  },
-  "application/vnd.google-apps.drawing": {
-    mimeType: "application/pdf",
-    extension: "pdf",
-  },
-};
+function shouldProxyInlineMediaPreview(
+  forceDownload: boolean,
+  requestedMimeType: string | null
+) {
+  return (
+    !forceDownload &&
+    Boolean(
+      requestedMimeType &&
+        (requestedMimeType.startsWith("video/") ||
+          requestedMimeType.startsWith("audio/"))
+    )
+  );
+}
 
 function ensureExtension(name: string, extension: string) {
   return name.toLowerCase().endsWith(`.${extension}`) ? name : `${name}.${extension}`;
@@ -61,7 +54,11 @@ function ensureExtension(name: string, extension: string) {
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ provider: string }> }
-) {
+ ) {
+  let proxyLease:
+    | ReturnType<typeof acquireConcurrencySlot>
+    | null = null;
+
   try {
     const { access } = await resolveRequestAccess(req, {
       allowTrustedDevice: true,
@@ -76,8 +73,27 @@ export async function GET(
     const requestedMimeType = req.nextUrl.searchParams.get("mimeType");
     const forceDownload = req.nextUrl.searchParams.get("download") === "1";
     const range = req.headers.get("range");
+    const transferType = forceDownload ? "download" : "preview";
+    const forceSameOriginInlinePreview = shouldProxyInlineMediaPreview(
+      forceDownload,
+      requestedMimeType
+    );
     if (!fileId) {
       return NextResponse.json({ error: "Missing fileId" }, { status: 400 });
+    }
+
+    const rateLimit = checkRateLimit({
+      key: `cloud-open:${transferType}:${access.user.id}:${getClientIp(req.headers)}`,
+      limit: forceDownload ? 60 : 240,
+      windowMs: 60 * 1000,
+    });
+    if (!rateLimit.allowed) {
+      return createRateLimitResponse(
+        rateLimit,
+        forceDownload
+          ? "Too many file downloads at once. Please retry shortly."
+          : "Too many file preview requests at once. Please retry shortly."
+      );
     }
 
     const requestedAccountId =
@@ -101,6 +117,31 @@ export async function GET(
       const accessToken = await getCloudAccessToken(account);
       const exportMap = forceDownload ? GOOGLE_DOWNLOAD_EXPORTS : GOOGLE_PREVIEW_EXPORTS;
       const exportTarget = requestedMimeType ? exportMap[requestedMimeType] : null;
+      if (forceDownload) {
+        const metadata = await getGoogleDriveFileMetadata(accessToken, remoteFileId);
+        const directBrowserUrl = getGoogleDriveBrowserOpenUrl(
+          metadata,
+          exportTarget?.mimeType
+        );
+
+        if (directBrowserUrl) {
+          const redirectResponse = NextResponse.redirect(directBrowserUrl, 307);
+          redirectResponse.headers.set("Cache-Control", "private, no-store");
+          redirectResponse.headers.set("Referrer-Policy", "no-referrer");
+          return redirectResponse;
+        }
+      }
+
+      proxyLease = acquireConcurrencySlot({
+        key: `cloud-open-proxy:google:${transferType}`,
+        limit: TRANSFER_CONCURRENCY_LIMITS[transferType],
+      });
+      if (!proxyLease.allowed) {
+        return createBusyResponse(
+          "Google Drive transfers are saturated on this instance. Please retry shortly.",
+          proxyLease.retryAfterSeconds
+        );
+      }
 
       upstream = exportTarget
         ? await exportGoogleDriveFile(accessToken, remoteFileId, exportTarget.mimeType)
@@ -122,6 +163,28 @@ export async function GET(
         return NextResponse.json({ error: "OneDrive not connected" }, { status: 400 });
       }
       const accessToken = await getCloudAccessToken(account);
+      const directDownloadUrl = await getOneDriveDirectDownloadUrl(
+        accessToken,
+        remoteFileId
+      );
+      if (directDownloadUrl && !forceSameOriginInlinePreview) {
+        const redirectResponse = NextResponse.redirect(directDownloadUrl, 307);
+        redirectResponse.headers.set("Cache-Control", "private, no-store");
+        redirectResponse.headers.set("Referrer-Policy", "no-referrer");
+        return redirectResponse;
+      }
+
+      proxyLease = acquireConcurrencySlot({
+        key: `cloud-open-proxy:onedrive:${transferType}`,
+        limit: TRANSFER_CONCURRENCY_LIMITS[transferType],
+      });
+      if (!proxyLease.allowed) {
+        return createBusyResponse(
+          "OneDrive transfers are saturated on this instance. Please retry shortly.",
+          proxyLease.retryAfterSeconds
+        );
+      }
+
       upstream = await downloadOneDriveFile(accessToken, remoteFileId, { range });
     } else {
       return NextResponse.json({ error: "Unsupported provider" }, { status: 400 });
@@ -159,7 +222,12 @@ export async function GET(
         upstream.headers.get("Content-Type") || "application/octet-stream"
       )
     );
-    headers.set("Cache-Control", "private, no-store");
+    headers.set(
+      "Cache-Control",
+      !forceDownload && !range ? PREVIEW_CACHE_CONTROL : "private, no-store"
+    );
+    headers.set("Referrer-Policy", "no-referrer");
+    headers.set("Vary", "Range");
 
     const contentDisposition = upstream.headers.get("Content-Disposition");
     if (contentDisposition) {
@@ -223,5 +291,7 @@ export async function GET(
 
     console.error("Open file error:", error);
     return NextResponse.json({ error: "Server error" }, { status: 500 });
+  } finally {
+    proxyLease?.release();
   }
 }

@@ -11,13 +11,23 @@ export const RESERVED_SUBDOMAINS = [
 ] as const;
 
 const SUBDOMAIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])$/;
+const DEFAULT_ROOT_DOMAIN = "oneflash.one";
 
 export function getRootDomain() {
   return (
-    process.env.NEXT_PUBLIC_ROOT_DOMAIN ||
     process.env.ROOT_DOMAIN ||
-    "oneflash.one"
+    process.env.NEXT_PUBLIC_ROOT_DOMAIN ||
+    DEFAULT_ROOT_DOMAIN
   ).toLowerCase();
+}
+
+export function isLocalRootDomain(rootDomain: string) {
+  return (
+    rootDomain === "localhost" ||
+    rootDomain === "127.0.0.1" ||
+    rootDomain === "lvh.me" ||
+    rootDomain.endsWith(".localhost")
+  );
 }
 
 export function normalizeSubdomain(value: string) {
@@ -72,4 +82,15 @@ export function getSubdomainFromHost(host: string | null, rootDomain = getRootDo
   }
 
   return subdomain;
+}
+
+export function getSubdomainUrl(
+  subdomain: string,
+  rootDomain = getRootDomain()
+) {
+  const normalizedSubdomain = normalizeSubdomain(subdomain);
+  const protocol = isLocalRootDomain(rootDomain) ? "http" : "https";
+  const port = isLocalRootDomain(rootDomain) ? ":3000" : "";
+
+  return `${protocol}://${normalizedSubdomain}.${rootDomain}${port}`;
 }

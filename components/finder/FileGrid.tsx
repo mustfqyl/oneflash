@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 import {
   useCallback,
   type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   useEffect,
   useRef,
@@ -16,6 +17,7 @@ import {
   ArrowPathIcon,
   DocumentIcon,
   FolderIcon,
+  PlayIcon,
   StarIcon,
   XMarkIcon,
 } from "@heroicons/react/24/solid";
@@ -24,6 +26,11 @@ import CloudActionTargetDialog, {
 } from "./CloudActionTargetDialog";
 import { type CloudActionTarget, type CloudFile, useCloud } from "./CloudContext";
 import FileTypeIcon from "./FileTypeIcon";
+import {
+  CLOUD_PREVIEW_SW_READY_EVENT,
+  isOffloadedPreviewUrl,
+  requiresCloudPreviewServiceWorker,
+} from "@/lib/cloud-preview";
 
 interface ContextMenuState {
   x: number;
@@ -37,6 +44,8 @@ interface SelectionBoxState {
   currentX: number;
   currentY: number;
 }
+
+type NavigationDirection = "left" | "right" | "up" | "down";
 
 interface TablePreview {
   kind: "table";
@@ -191,10 +200,15 @@ const DENSITY_STYLES = {
 
 const BACKGROUND_CACHE_CONCURRENCY = 4;
 const BACKGROUND_CACHE_DELAY_MS = 900;
-const BACKGROUND_CACHE_MAX_FILE_BYTES = 256 * 1024 * 1024;
-const BACKGROUND_CACHE_TOTAL_BYTES = 768 * 1024 * 1024;
+const BACKGROUND_CACHE_MAX_FILE_BYTES = 100 * 1024 * 1024;
+const BACKGROUND_CACHE_TOTAL_BYTES = 300 * 1024 * 1024;
+const ON_DEMAND_PREVIEW_CACHE_MAX_FILE_BYTES = 100 * 1024 * 1024;
+const TARGETED_VIDEO_WARM_DELAY_MS = 140;
+const VIDEO_THUMBNAIL_SEEK_SECONDS = 0.35;
+const VIDEO_THUMBNAIL_REVEAL_TIMEOUT_MS = 320;
 const TEXT_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 const ZIP_PREVIEW_MAX_BYTES = 12 * 1024 * 1024;
+const ENABLE_BACKGROUND_PREVIEW_WARMING = false;
 
 const TEXT_FILE_EXTENSIONS = new Set([
   "txt",
@@ -257,10 +271,6 @@ function getFileExtensionFromName(name: string) {
     return "";
   }
   return trimmed.slice(lastDot + 1).toLowerCase();
-}
-
-function isGoogleWorkspaceMimeType(mimeType: string) {
-  return mimeType.startsWith("application/vnd.google-apps.");
 }
 
 function isTextualMimeType(mimeType: string, fileName: string) {
@@ -535,6 +545,31 @@ function getSelectionBounds(box: SelectionBoxState) {
   };
 }
 
+function isInteractiveKeyboardTarget(
+  target: EventTarget | null,
+  currentTarget: HTMLElement | null
+) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (currentTarget && target === currentTarget) {
+    return false;
+  }
+
+  if (target.isContentEditable || target.closest("[contenteditable='true']")) {
+    return true;
+  }
+
+  return Boolean(
+    target.closest("input, textarea, select, button, a, [role='button'], [role='dialog']")
+  );
+}
+
+function getKeyboardItemId(fileId: string) {
+  return `finder-item-${fileId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
 function normalizeDroppedRelativePath(path?: string) {
   return (path || "")
     .split("/")
@@ -644,11 +679,8 @@ function ImageThumbnail({
   alt: string;
   className: string;
 }) {
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    setFailed(false);
-  }, [src]);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const failed = Boolean(src && failedSrc === src);
 
   if (failed || !src) {
     return <DocumentIcon className={className} />;
@@ -659,163 +691,256 @@ function ImageThumbnail({
       src={src}
       alt={alt}
       className={className}
-      onError={() => setFailed(true)}
+      decoding="async"
+      loading="lazy"
+      onError={() => setFailedSrc(src)}
+      referrerPolicy="no-referrer"
+      crossOrigin="anonymous"
     />
   );
-}
-
-const VIDEO_THUMBNAIL_DARK_FRAME_THRESHOLD = 22;
-const VIDEO_THUMBNAIL_BRIGHT_PIXEL_THRESHOLD = 48;
-
-function getVideoThumbnailSeekTimes(duration: number) {
-  if (!Number.isFinite(duration) || duration <= 0) {
-    return [0];
-  }
-
-  const safeEnd = Math.max(duration - 0.1, 0);
-  const candidates = [0.12, 0.24, 0.4, 0.58, 0.78].map((ratio) =>
-    Math.max(0, Math.min(safeEnd, duration * ratio))
-  );
-
-  return Array.from(new Set(candidates));
-}
-
-function captureVideoThumbnail(video: HTMLVideoElement) {
-  if (video.videoWidth <= 0 || video.videoHeight <= 0) {
-    return null;
-  }
-
-  const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) {
-    return null;
-  }
-
-  context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-  const sampleCanvas = document.createElement("canvas");
-  sampleCanvas.width = 8;
-  sampleCanvas.height = 8;
-  const sampleContext = sampleCanvas.getContext("2d", { willReadFrequently: true });
-  if (!sampleContext) {
-    return { src: canvas.toDataURL("image/jpeg", 0.82), isMostlyDark: false };
-  }
-
-  sampleContext.drawImage(video, 0, 0, sampleCanvas.width, sampleCanvas.height);
-  const { data } = sampleContext.getImageData(
-    0,
-    0,
-    sampleCanvas.width,
-    sampleCanvas.height
-  );
-
-  let totalBrightness = 0;
-  let brightestPixel = 0;
-  let pixelCount = 0;
-
-  for (let index = 0; index < data.length; index += 4) {
-    const brightness =
-      0.2126 * data[index] + 0.7152 * data[index + 1] + 0.0722 * data[index + 2];
-    totalBrightness += brightness;
-    brightestPixel = Math.max(brightestPixel, brightness);
-    pixelCount += 1;
-  }
-
-  const averageBrightness = pixelCount > 0 ? totalBrightness / pixelCount : 0;
-
-  return {
-    src: canvas.toDataURL("image/jpeg", 0.82),
-    isMostlyDark:
-      averageBrightness <= VIDEO_THUMBNAIL_DARK_FRAME_THRESHOLD &&
-      brightestPixel <= VIDEO_THUMBNAIL_BRIGHT_PIXEL_THRESHOLD,
-  };
 }
 
 function VideoThumbnail({
   src,
   className,
+  iconClassName,
 }: {
   src: string | null;
   className: string;
+  iconClassName: string;
 }) {
-  const [failed, setFailed] = useState(false);
-  const [frameSrc, setFrameSrc] = useState<string | null>(null);
-  const seekTimesRef = useRef<number[]>([]);
-  const seekIndexRef = useRef(0);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const [shouldLoad, setShouldLoad] = useState(false);
+  const [frameReady, setFrameReady] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const revealTimerRef = useRef<number | null>(null);
+  const seekPendingRef = useRef(false);
+  const failed = Boolean(src && failedSrc === src);
+
+  const clearRevealTimer = useCallback(() => {
+    if (revealTimerRef.current !== null) {
+      window.clearTimeout(revealTimerRef.current);
+      revealTimerRef.current = null;
+    }
+  }, []);
+
+  const revealFrame = useCallback(() => {
+    seekPendingRef.current = false;
+    clearRevealTimer();
+    setFrameReady(true);
+  }, [clearRevealTimer]);
+
+  useEffect(() => () => clearRevealTimer(), [clearRevealTimer]);
 
   useEffect(() => {
-    setFailed(false);
-    setFrameSrc(null);
-    seekTimesRef.current = [];
-    seekIndexRef.current = 0;
-  }, [src]);
+    if (shouldLoad || !src || typeof IntersectionObserver === "undefined") {
+      return;
+    }
 
-  if (failed || !src) {
-    return <DocumentIcon className={className} />;
-  }
+    const node = containerRef.current;
+    if (!node) {
+      return;
+    }
 
-  if (frameSrc) {
-    return <img src={frameSrc} alt="" className={className} />;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setShouldLoad(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "240px" }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [shouldLoad, src]);
+
+  const handleLoadedMetadata = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const targetTime =
+      duration > VIDEO_THUMBNAIL_SEEK_SECONDS
+        ? Math.min(VIDEO_THUMBNAIL_SEEK_SECONDS, Math.max(duration * 0.12, 0.1))
+        : 0;
+
+    if (targetTime <= 0) {
+      revealFrame();
+      return;
+    }
+
+    try {
+      if (Math.abs(video.currentTime - targetTime) < 0.01) {
+        revealFrame();
+        return;
+      }
+      seekPendingRef.current = true;
+      video.currentTime = targetTime;
+      clearRevealTimer();
+      revealTimerRef.current = window.setTimeout(() => {
+        revealTimerRef.current = null;
+        revealFrame();
+      }, VIDEO_THUMBNAIL_REVEAL_TIMEOUT_MS);
+    } catch {
+      revealFrame();
+    }
+  }, [clearRevealTimer, revealFrame]);
+
+  const handleSeeked = useCallback(() => {
+    revealFrame();
+  }, [revealFrame]);
+
+  const handleLoadedData = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) {
+      revealFrame();
+      return;
+    }
+
+    if (!seekPendingRef.current || video.currentTime > 0.01) {
+      revealFrame();
+    }
+  }, [revealFrame]);
+
+  const handleCanPlay = useCallback(() => {
+    if (!seekPendingRef.current) {
+      revealFrame();
+    }
+  }, [revealFrame]);
+
+  const handleError = useCallback(() => {
+    seekPendingRef.current = false;
+    clearRevealTimer();
+    setFailedSrc(src);
+  }, [clearRevealTimer, src]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative h-full w-full overflow-hidden bg-surface-elevated"
+      data-media-thumbnail="video"
+    >
+      {(shouldLoad || typeof IntersectionObserver === "undefined") &&
+      src &&
+      !failed ? (
+        <>
+          <video
+            ref={videoRef}
+            aria-hidden="true"
+            className={`${className} pointer-events-none transition-opacity duration-150 ${
+              frameReady ? "opacity-100" : "opacity-0"
+            }`}
+            disablePictureInPicture
+            muted
+            onCanPlay={handleCanPlay}
+            onError={handleError}
+            onLoadedData={handleLoadedData}
+            onLoadedMetadata={handleLoadedMetadata}
+            onSeeked={handleSeeked}
+            playsInline
+            preload="metadata"
+            src={src}
+            crossOrigin="anonymous"
+          />
+          {!frameReady ? (
+            <div className="absolute inset-0 flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-900/70 via-slate-800/70 to-slate-950/80 text-white/75">
+              <PlayIcon className={iconClassName} />
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-900/70 via-slate-800/70 to-slate-950/80 text-white/75">
+          <PlayIcon className={iconClassName} />
+        </div>
+      )}
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-slate-950/35 via-transparent to-white/10" />
+      <div className="pointer-events-none absolute bottom-1.5 right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/55 text-white shadow-md">
+        <PlayIcon className="h-2.5 w-2.5" />
+      </div>
+    </div>
+  );
+}
+
+function VideoPreviewPlayer({
+  primarySrc,
+  fallbackSrc,
+  className,
+}: {
+  primarySrc: string | null;
+  fallbackSrc: string | null;
+  className: string;
+}) {
+  const [activeSrc, setActiveSrc] = useState<string | null>(
+    primarySrc || fallbackSrc
+  );
+
+  const handleError = useCallback(() => {
+    setActiveSrc((current) => {
+      if (!fallbackSrc || current === fallbackSrc) {
+        return current;
+      }
+      return fallbackSrc;
+    });
+  }, [fallbackSrc]);
+
+  if (!activeSrc) {
+    return null;
   }
 
   return (
     <video
-      src={src}
-      className="absolute inset-0 h-0 w-0 opacity-0 pointer-events-none"
-      muted
+      key={activeSrc}
+      src={activeSrc}
+      controls
+      autoPlay
       playsInline
-      preload="metadata"
-      onLoadedMetadata={(event) => {
-        const video = event.currentTarget;
-        seekTimesRef.current = getVideoThumbnailSeekTimes(video.duration);
-        seekIndexRef.current = 0;
-        const targetTime = seekTimesRef.current[0] ?? 0;
-        if (targetTime <= 0) {
-          return;
-        }
-        video.currentTime = targetTime;
-      }}
-      onLoadedData={(event) => {
-        const video = event.currentTarget;
-        if (frameSrc || failed) {
-          return;
-        }
-        if ((seekTimesRef.current[seekIndexRef.current] ?? 0) > 0) {
-          return;
-        }
-        const capture = captureVideoThumbnail(video);
-        if (!capture) {
-          setFailed(true);
-          return;
-        }
-        setFrameSrc(capture.src);
-      }}
-      onSeeked={(event) => {
-        const video = event.currentTarget;
-        try {
-          const capture = captureVideoThumbnail(video);
-          if (!capture) {
-            setFailed(true);
-            return;
-          }
+      preload="auto"
+      onError={handleError}
+      className={className}
+    />
+  );
+}
 
-          if (
-            capture.isMostlyDark &&
-            seekIndexRef.current < seekTimesRef.current.length - 1
-          ) {
-            seekIndexRef.current += 1;
-            video.currentTime = seekTimesRef.current[seekIndexRef.current] ?? 0;
-            return;
-          }
+function AudioPreviewPlayer({
+  primarySrc,
+  fallbackSrc,
+  className,
+}: {
+  primarySrc: string | null;
+  fallbackSrc: string | null;
+  className: string;
+}) {
+  const [activeSrc, setActiveSrc] = useState<string | null>(
+    primarySrc || fallbackSrc
+  );
 
-          setFrameSrc(capture.src);
-        } catch {
-          setFailed(true);
-        }
-      }}
-      onError={() => setFailed(true)}
+  const handleError = useCallback(() => {
+    setActiveSrc((current) => {
+      if (!fallbackSrc || current === fallbackSrc) {
+        return current;
+      }
+      return fallbackSrc;
+    });
+  }, [fallbackSrc]);
+
+  if (!activeSrc) {
+    return null;
+  }
+
+  return (
+    <audio
+      key={activeSrc}
+      src={activeSrc}
+      controls
+      autoPlay
+      preload="auto"
+      onError={handleError}
+      className={className}
     />
   );
 }
@@ -867,10 +992,13 @@ export default function FileGrid() {
   const [renameDialog, setRenameDialog] = useState<{ open: boolean; fileId: string; name: string } | null>(null);
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
+  const [fileDialogOpen, setFileDialogOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
+  const [newFileName, setNewFileName] = useState("");
   const [createSubmitting, setCreateSubmitting] = useState(false);
-  const [targetDialogAction, setTargetDialogAction] = useState<"folder" | "upload" | null>(null);
+  const [targetDialogAction, setTargetDialogAction] = useState<"folder" | "file" | "upload" | null>(null);
   const [pendingFolderTarget, setPendingFolderTarget] = useState<CloudActionTarget | null>(null);
+  const [pendingFileTarget, setPendingFileTarget] = useState<CloudActionTarget | null>(null);
   const [pendingUploadTarget, setPendingUploadTarget] = useState<CloudActionTarget | null>(null);
   const [pendingDroppedItems, setPendingDroppedItems] = useState<ExternalUploadItem[] | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -878,7 +1006,10 @@ export default function FileGrid() {
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const [selectionBox, setSelectionBox] = useState<SelectionBoxState | null>(null);
+  const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [cachedPreviewUrls, setCachedPreviewUrls] = useState<Record<string, string>>({});
+  const [cloudPreviewTransportReady, setCloudPreviewTransportReady] = useState(false);
+  const [documentPreviewUrl, setDocumentPreviewUrl] = useState<string | null>(null);
   const [richPreview, setRichPreview] = useState<RichPreview | null>(null);
   const [richPreviewLoading, setRichPreviewLoading] = useState(false);
   const [richPreviewError, setRichPreviewError] = useState<string | null>(null);
@@ -890,9 +1021,16 @@ export default function FileGrid() {
   const dragSelectionBaseRef = useRef<string[]>([]);
   const dragSelectionAdditiveRef = useRef(false);
   const dragSelectionMovedRef = useRef(false);
+  const selectionAnchorIdRef = useRef<string | null>(null);
   const suppressClearClickRef = useRef(false);
   const cachedPreviewUrlsRef = useRef<Record<string, string>>({});
   const previewWarmAbortRef = useRef<AbortController | null>(null);
+  const onDemandPreviewCacheAbortRef = useRef<AbortController | null>(null);
+  const targetedVideoWarmRef = useRef<{ key: string | null; element: HTMLVideoElement | null }>({
+    key: null,
+    element: null,
+  });
+  const targetedVideoWarmTimerRef = useRef<number | null>(null);
   const showInitialLoading = loading && files.length === 0;
   const showBackgroundRefreshing = loading && files.length > 0;
   const favoritesView = pathname === "/favorites";
@@ -911,11 +1049,38 @@ export default function FileGrid() {
   const canStartCloudWriteAction =
     Boolean(currentLocationAccountId) || actionTargetOptions.length > 0;
   const canAcceptExternalUpload = canStartCloudWriteAction;
+  const focusGrid = () => {
+    gridRef.current?.focus({ preventScroll: true });
+  };
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const currentWindow = window as Window & {
+      __oneflashCloudPreviewWorkerReady__?: boolean;
+    };
+    const syncReadyState = () => {
+      setCloudPreviewTransportReady(
+        Boolean(currentWindow.__oneflashCloudPreviewWorkerReady__)
+      );
+    };
+
+    syncReadyState();
+    window.addEventListener(CLOUD_PREVIEW_SW_READY_EVENT, syncReadyState);
+    return () => {
+      window.removeEventListener(CLOUD_PREVIEW_SW_READY_EVENT, syncReadyState);
+    };
+  }, []);
   const dialogButtonBaseClass =
     "inline-flex min-w-[96px] items-center justify-center gap-2 rounded px-3 py-1.5 text-sm font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.98] disabled:cursor-not-allowed";
   const dialogSecondaryButtonClass = `${dialogButtonBaseClass} bg-surface-elevated text-foreground hover:bg-hover disabled:opacity-50`;
   const dialogPrimaryButtonClass = `${dialogButtonBaseClass} bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-80`;
   const dialogDangerButtonClass = `${dialogButtonBaseClass} bg-red-600 text-white hover:bg-red-500 disabled:opacity-80`;
+  const modalOverlayClass =
+    "fixed inset-0 z-[80] flex items-center justify-center bg-overlay px-4 backdrop-blur-sm";
+  const modalOverlayStrongClass =
+    "fixed inset-0 z-[80] flex items-center justify-center bg-overlay-strong backdrop-blur-sm";
   const pendingFolderTargetLabel =
     pendingFolderTarget &&
     actionTargetOptions.find(
@@ -923,11 +1088,18 @@ export default function FileGrid() {
         option.provider === pendingFolderTarget.provider &&
         option.accountId === pendingFolderTarget.accountId
     );
+  const pendingFileTargetLabel =
+    pendingFileTarget &&
+    actionTargetOptions.find(
+      (option) =>
+        option.provider === pendingFileTarget.provider &&
+        option.accountId === pendingFileTarget.accountId
+    );
 
   const isExternalFileDrag = (event: DragEvent | ReactDragEvent) =>
     Array.from(event.dataTransfer?.types || []).includes("Files");
 
-  const startFolderFlow = useCallback(() => {
+  const startFolderFlow = () => {
     setMenu(null);
 
     if (currentLocationAccountId) {
@@ -945,9 +1117,29 @@ export default function FileGrid() {
     if (actionTargetOptions.length > 1) {
       setTargetDialogAction("folder");
     }
-  }, [actionTargetOptions, currentLocationAccountId]);
+  };
 
-  const startUploadFlow = useCallback(() => {
+  const startFileFlow = () => {
+    setMenu(null);
+
+    if (currentLocationAccountId) {
+      setPendingFileTarget(null);
+      setFileDialogOpen(true);
+      return;
+    }
+
+    if (actionTargetOptions.length === 1) {
+      setPendingFileTarget(actionTargetOptions[0]);
+      setFileDialogOpen(true);
+      return;
+    }
+
+    if (actionTargetOptions.length > 1) {
+      setTargetDialogAction("file");
+    }
+  };
+
+  const startUploadFlow = () => {
     setMenu(null);
     setPendingDroppedItems(null);
 
@@ -966,24 +1158,21 @@ export default function FileGrid() {
     if (actionTargetOptions.length > 1) {
       setTargetDialogAction("upload");
     }
-  }, [actionTargetOptions, currentLocationAccountId]);
+  };
 
-  const handleDroppedUpload = useCallback(
-    async (items: ExternalUploadItem[]) => {
-      if (items.length === 0) {
-        return;
-      }
+  const handleDroppedUpload = async (items: ExternalUploadItem[]) => {
+    if (items.length === 0) {
+      return;
+    }
 
-      if (currentLocationAccountId || implicitUploadTarget) {
-        await uploadFiles(items, implicitUploadTarget || undefined);
-        return;
-      }
+    if (currentLocationAccountId || implicitUploadTarget) {
+      await uploadFiles(items, implicitUploadTarget || undefined);
+      return;
+    }
 
-      setPendingDroppedItems(items);
-      setTargetDialogAction("upload");
-    },
-    [currentLocationAccountId, implicitUploadTarget, uploadFiles]
-  );
+    setPendingDroppedItems(items);
+    setTargetDialogAction("upload");
+  };
 
   const handleTargetSelect = useCallback(
     (target: CloudActionTarget) => {
@@ -992,6 +1181,12 @@ export default function FileGrid() {
       if (targetDialogAction === "folder") {
         setPendingFolderTarget(target);
         setFolderDialogOpen(true);
+        return;
+      }
+
+      if (targetDialogAction === "file") {
+        setPendingFileTarget(target);
+        setFileDialogOpen(true);
         return;
       }
 
@@ -1028,10 +1223,16 @@ export default function FileGrid() {
       fileId: string,
       fileProvider?: "google" | "onedrive" | null,
       fileName?: string,
-      mimeType?: string
+      mimeType?: string,
+      downloadUrl?: string | null,
+      directUrl?: string | null
     ) =>
-      !isOptimisticUploadId(fileId) && providerForFile(fileProvider)
-        ? `${window.location.origin}/api/cloud/${providerForFile(fileProvider)}/open?fileId=${encodeURIComponent(fileId)}&download=1${fileName ? `&name=${encodeURIComponent(fileName)}` : ""}${mimeType ? `&mimeType=${encodeURIComponent(mimeType)}` : ""}`
+      !isOptimisticUploadId(fileId)
+        ? downloadUrl ||
+          directUrl ||
+          (providerForFile(fileProvider)
+            ? `${window.location.origin}/api/cloud/${providerForFile(fileProvider)}/open?fileId=${encodeURIComponent(fileId)}&download=1${fileName ? `&name=${encodeURIComponent(fileName)}` : ""}${mimeType ? `&mimeType=${encodeURIComponent(mimeType)}` : ""}`
+            : null)
         : null,
     [providerForFile]
   );
@@ -1047,82 +1248,387 @@ export default function FileGrid() {
         : null,
     [providerForFile]
   );
+  const buildAppPreviewUrl = useCallback(
+    (
+      fileId: string,
+      fileProvider?: "google" | "onedrive" | null,
+      accountId?: string | null,
+      fileName?: string,
+      mimeType?: string
+    ) =>
+      !isOptimisticUploadId(fileId) && providerForFile(fileProvider)
+        ? `/api/cloud/${providerForFile(fileProvider)}/open?fileId=${encodeURIComponent(fileId)}${accountId ? `&accountId=${encodeURIComponent(accountId)}` : ""}${fileName ? `&name=${encodeURIComponent(fileName)}` : ""}${mimeType ? `&mimeType=${encodeURIComponent(mimeType)}` : ""}`
+        : null,
+    [providerForFile]
+  );
+  const shouldForceSameOriginMediaPreview = useCallback(
+    (mimeType?: string | null) =>
+      Boolean(
+        mimeType &&
+          (mimeType.startsWith("video/") || mimeType.startsWith("audio/"))
+      ),
+    []
+  );
+  const shouldForceSameOriginDocumentPreview = useCallback(
+    (fileName?: string, mimeType?: string | null) => {
+      const resolvedMimeType = mimeType || "";
+      return (
+        resolvedMimeType === "application/pdf" ||
+        isCsvLikeFile(resolvedMimeType, fileName || "") ||
+        isHtmlLikeFile(resolvedMimeType, fileName || "") ||
+        isZipLikeFile(resolvedMimeType, fileName || "") ||
+        isTextualMimeType(resolvedMimeType, fileName || "")
+      );
+    },
+    []
+  );
 
   const buildPreviewUrl = useCallback(
     (
       fileId: string,
       fileProvider?: "google" | "onedrive" | null,
+      accountId?: string | null,
       fileName?: string,
-      mimeType?: string
-    ) =>
-      !isOptimisticUploadId(fileId) && providerForFile(fileProvider)
-        ? `/api/cloud/${providerForFile(fileProvider)}/open?fileId=${encodeURIComponent(fileId)}${fileName ? `&name=${encodeURIComponent(fileName)}` : ""}${mimeType ? `&mimeType=${encodeURIComponent(mimeType)}` : ""}`
-        : null,
-    [providerForFile]
+      mimeType?: string,
+      previewUrl?: string | null,
+      directUrl?: string | null
+    ) => {
+      if (isOptimisticUploadId(fileId)) {
+        return null;
+      }
+
+      const appPreviewUrl = buildAppPreviewUrl(
+        fileId,
+        fileProvider,
+        accountId,
+        fileName,
+        mimeType
+      );
+      if (shouldForceSameOriginMediaPreview(mimeType)) {
+        return appPreviewUrl;
+      }
+      if (shouldForceSameOriginDocumentPreview(fileName, mimeType)) {
+        return appPreviewUrl;
+      }
+
+      return (
+        (previewUrl &&
+          (!requiresCloudPreviewServiceWorker(previewUrl) ||
+            cloudPreviewTransportReady)
+          ? previewUrl
+          : null) ||
+        directUrl ||
+        appPreviewUrl
+      );
+    },
+    [
+      buildAppPreviewUrl,
+      cloudPreviewTransportReady,
+      shouldForceSameOriginDocumentPreview,
+      shouldForceSameOriginMediaPreview,
+    ]
+  );
+  const getPreviewMimeType = useCallback(
+    (file: Pick<CloudFile, "mimeType" | "previewMimeType">) =>
+      file.previewMimeType || file.mimeType,
+    []
+  );
+  const getOffloadedPreviewUrl = useCallback(
+    (
+      file: Pick<
+        CloudFile,
+        "previewUrl" | "directUrl"
+      >
+    ) => {
+      if (
+        file.previewUrl &&
+        (!requiresCloudPreviewServiceWorker(file.previewUrl) ||
+          cloudPreviewTransportReady)
+      ) {
+        return file.previewUrl;
+      }
+
+      if (file.directUrl && isOffloadedPreviewUrl(file.directUrl)) {
+        return file.directUrl;
+      }
+
+      return null;
+    },
+    [cloudPreviewTransportReady]
   );
 
   const isImageFile = (mimeType: string) => mimeType.startsWith("image/");
   const isVideoFile = (mimeType: string) => mimeType.startsWith("video/");
   const isAudioFile = (mimeType: string) => mimeType.startsWith("audio/");
   const isPdfFile = (mimeType: string) => mimeType === "application/pdf";
+  const canWarmVideoWithoutProxy = useCallback(
+    (
+      file: Pick<
+        CloudFile,
+        "id" | "mimeType" | "previewMimeType" | "previewUrl" | "directUrl" | "provider" | "accountId"
+      >
+    ) =>
+      isVideoFile(getPreviewMimeType(file)) &&
+      Boolean(getOffloadedPreviewUrl(file)) &&
+      Boolean(providerForFile(file.provider)),
+    [getOffloadedPreviewUrl, getPreviewMimeType, providerForFile]
+  );
+  const getVideoPointerWarmUrl = useCallback(
+    (
+      file: Pick<
+        CloudFile,
+        "id" | "name" | "mimeType" | "previewMimeType" | "previewUrl" | "directUrl" | "provider" | "accountId"
+      >
+    ) => {
+      if (
+        !isVideoFile(getPreviewMimeType(file)) ||
+        !providerForFile(file.provider)
+      ) {
+        return null;
+      }
+
+      return (
+        getOffloadedPreviewUrl(file) ||
+        buildAppPreviewUrl(
+          file.id,
+          file.provider,
+          file.accountId,
+          file.name,
+          getPreviewMimeType(file)
+        )
+      );
+    },
+    [buildAppPreviewUrl, getOffloadedPreviewUrl, getPreviewMimeType, providerForFile]
+  );
+  const clearTargetedVideoWarmTimer = useCallback(() => {
+    if (targetedVideoWarmTimerRef.current !== null) {
+      window.clearTimeout(targetedVideoWarmTimerRef.current);
+      targetedVideoWarmTimerRef.current = null;
+    }
+  }, []);
+  const releaseTargetedVideoWarm = useCallback(
+    (preserveKey?: string) => {
+      clearTargetedVideoWarmTimer();
+
+      const current = targetedVideoWarmRef.current;
+      if (!current.element || (preserveKey && current.key === preserveKey)) {
+        return;
+      }
+
+      current.element.removeAttribute("src");
+      current.element.load();
+      targetedVideoWarmRef.current = { key: null, element: null };
+    },
+    [clearTargetedVideoWarmTimer]
+  );
+  const warmVideoForPlayback = useCallback(
+    (
+      file: Pick<
+        CloudFile,
+        "id" | "name" | "mimeType" | "previewMimeType" | "previewUrl" | "directUrl" | "provider" | "accountId"
+      >,
+      options?: {
+        allowProxyFallback?: boolean;
+      }
+    ) => {
+      const warmUrl = options?.allowProxyFallback
+        ? getVideoPointerWarmUrl(file)
+        : getOffloadedPreviewUrl(file);
+      const canWarm = options?.allowProxyFallback
+        ? Boolean(warmUrl)
+        : canWarmVideoWithoutProxy(file);
+      if (!canWarm || !warmUrl) {
+        releaseTargetedVideoWarm();
+        return;
+      }
+
+      const cacheKey = getPreviewCacheKey(file.id, file.provider);
+      if (targetedVideoWarmRef.current.key === cacheKey) {
+        return;
+      }
+
+      releaseTargetedVideoWarm(cacheKey);
+
+      const video = document.createElement("video");
+      video.preload = "auto";
+      video.muted = true;
+      video.playsInline = true;
+      video.disablePictureInPicture = true;
+      video.src = warmUrl;
+      video.load();
+
+      targetedVideoWarmRef.current = { key: cacheKey, element: video };
+    },
+    [
+      canWarmVideoWithoutProxy,
+      getOffloadedPreviewUrl,
+      getPreviewCacheKey,
+      getVideoPointerWarmUrl,
+      releaseTargetedVideoWarm,
+    ]
+  );
+  const warmVideoOnPointerDown = useCallback(
+    (
+      file: Pick<
+        CloudFile,
+        "id" | "name" | "mimeType" | "previewMimeType" | "previewUrl" | "directUrl" | "provider" | "accountId"
+      >
+    ) => {
+      warmVideoForPlayback(file, { allowProxyFallback: true });
+    },
+    [warmVideoForPlayback]
+  );
+  const scheduleVideoWarm = useCallback(
+    (
+      file: Pick<
+        CloudFile,
+        "id" | "name" | "mimeType" | "previewMimeType" | "previewUrl" | "directUrl" | "provider" | "accountId"
+      >
+    ) => {
+      if (!canWarmVideoWithoutProxy(file)) {
+        clearTargetedVideoWarmTimer();
+        return;
+      }
+
+      const cacheKey = getPreviewCacheKey(file.id, file.provider);
+      if (targetedVideoWarmRef.current.key === cacheKey) {
+        return;
+      }
+
+      clearTargetedVideoWarmTimer();
+      targetedVideoWarmTimerRef.current = window.setTimeout(() => {
+        targetedVideoWarmTimerRef.current = null;
+        warmVideoForPlayback(file);
+      }, TARGETED_VIDEO_WARM_DELAY_MS);
+    },
+    [
+      canWarmVideoWithoutProxy,
+      clearTargetedVideoWarmTimer,
+      getPreviewCacheKey,
+      warmVideoForPlayback,
+    ]
+  );
   const resolvePreviewUrl = useCallback(
     (
       fileId: string,
       fileProvider?: "google" | "onedrive" | null,
+      accountId?: string | null,
       fileName?: string,
-      mimeType?: string
+      mimeType?: string,
+      previewUrl?: string | null,
+      directUrl?: string | null
     ) => {
       const cachedUrl = cachedPreviewUrls[getPreviewCacheKey(fileId, fileProvider)];
-      return cachedUrl || buildPreviewUrl(fileId, fileProvider, fileName, mimeType);
+      return (
+        cachedUrl ||
+        buildPreviewUrl(
+          fileId,
+          fileProvider,
+          accountId,
+          fileName,
+          mimeType,
+          previewUrl,
+          directUrl
+        )
+      );
     },
     [buildPreviewUrl, cachedPreviewUrls, getPreviewCacheKey]
   );
+  const previewCacheKey = previewFile
+    ? getPreviewCacheKey(previewFile.id, previewFile.provider)
+    : null;
   const previewUrl = previewFile
     ? resolvePreviewUrl(
         previewFile.id,
         previewFile.provider,
+        previewFile.accountId,
         previewFile.name,
-        previewFile.mimeType
+        previewFile.mimeType,
+        previewFile.previewUrl,
+        previewFile.directUrl
       )
     : null;
+  const previewMimeType = previewFile
+    ? previewFile.previewMimeType || previewFile.mimeType
+    : null;
+  const previewIsCachedBlob = Boolean(previewUrl?.startsWith("blob:"));
+  const previewPlaybackPrimaryUrl =
+    previewFile && previewMimeType && !previewIsCachedBlob
+      ? getOffloadedPreviewUrl({
+          previewUrl: previewFile.previewUrl,
+          directUrl: previewFile.directUrl,
+        })
+      : null;
   const previewDownloadUrl = previewFile
     ? buildDownloadUrlForFile(
         previewFile.id,
         previewFile.provider,
         previewFile.name,
-        previewFile.mimeType
+        previewFile.mimeType,
+        previewFile.downloadUrl,
+        previewFile.directUrl
       )
     : null;
+  const resolvedDocumentPreviewUrl =
+    previewMimeType && isPdfFile(previewMimeType)
+      ? previewUrl
+      : previewUrl;
 
   useEffect(() => {
     let cancelled = false;
+    let nextDocumentPreviewUrl: string | null = null;
 
-    setRichPreview(null);
-    setRichPreviewError(null);
+    const loadRichPreview = async () => {
+      setDocumentPreviewUrl(null);
+      setRichPreview(null);
+      setRichPreviewError(null);
 
-    if (
-      !previewFile ||
-      !previewUrl ||
-      isImageFile(previewFile.mimeType) ||
-      isVideoFile(previewFile.mimeType) ||
-      isAudioFile(previewFile.mimeType) ||
-      isPdfFile(previewFile.mimeType)
-    ) {
-      setRichPreviewLoading(false);
-      return;
-    }
+      if (
+        !previewFile ||
+        !previewUrl ||
+        !previewMimeType ||
+        isImageFile(previewMimeType) ||
+        isVideoFile(previewMimeType) ||
+        isAudioFile(previewMimeType) ||
+        isPdfFile(previewMimeType)
+      ) {
+        setRichPreviewLoading(false);
+        return;
+      }
 
-    setRichPreviewLoading(true);
+      setRichPreviewLoading(true);
 
-    void (async () => {
       try {
-        const response = await fetch(previewUrl, { cache: "force-cache" });
+        const response = await fetch(previewUrl, { 
+          cache: "force-cache",
+          credentials: "same-origin"
+        });
         if (!response.ok) {
-          throw new Error("Preview file could not be loaded");
+          if (response.status === 401 || response.status === 403) {
+            throw new Error("Access denied. Please check your connection.");
+          }
+          throw new Error("The file could not be loaded for preview.");
         }
 
         const blob = await response.blob();
-        const nextPreview = await buildRichPreview(previewFile, blob);
+        if (cancelled) {
+          return;
+        }
+
+        if (isPdfFile(previewMimeType)) {
+          // PDFs are now handled directly by the proxy URL in the iframe for better reliability
+          return;
+        }
+
+        const nextPreview = await buildRichPreview(
+          previewMimeType === previewFile.mimeType
+            ? previewFile
+            : {
+                ...previewFile,
+                mimeType: previewMimeType,
+              },
+          blob
+        );
 
         if (cancelled) {
           return;
@@ -1144,12 +1650,17 @@ export default function FileGrid() {
           setRichPreviewLoading(false);
         }
       }
-    })();
+    };
+
+    void loadRichPreview();
 
     return () => {
       cancelled = true;
+      if (nextDocumentPreviewUrl) {
+        URL.revokeObjectURL(nextDocumentPreviewUrl);
+      }
     };
-  }, [previewFile, previewUrl]);
+  }, [previewFile, previewMimeType, previewUrl]);
 
   const buildTabDragPayload = (fileId: string) =>
     JSON.stringify({
@@ -1237,11 +1748,106 @@ export default function FileGrid() {
   useEffect(() => {
     return () => {
       previewWarmAbortRef.current?.abort();
+      onDemandPreviewCacheAbortRef.current?.abort();
       Object.values(cachedPreviewUrlsRef.current).forEach((objectUrl) => {
         URL.revokeObjectURL(objectUrl);
       });
+      releaseTargetedVideoWarm();
     };
-  }, []);
+  }, [releaseTargetedVideoWarm]);
+
+  useEffect(() => {
+    onDemandPreviewCacheAbortRef.current?.abort();
+
+    if (
+      !previewFile ||
+      !previewCacheKey ||
+      !previewUrl ||
+      !previewMimeType ||
+      cachedPreviewUrlsRef.current[previewCacheKey] ||
+      previewUrl.startsWith("blob:")
+    ) {
+      return;
+    }
+
+    const fileSize =
+      typeof previewFile.size === "string" || typeof previewFile.size === "number"
+        ? Number(previewFile.size)
+        : NaN;
+    if (
+      Number.isFinite(fileSize) &&
+      fileSize > ON_DEMAND_PREVIEW_CACHE_MAX_FILE_BYTES
+    ) {
+      return;
+    }
+
+    const controller = new AbortController();
+    onDemandPreviewCacheAbortRef.current = controller;
+
+    void (async () => {
+      try {
+        const response = await fetch(previewUrl, {
+          cache: "force-cache",
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          return;
+        }
+
+        const blob = await response.blob();
+        if (
+          controller.signal.aborted ||
+          blob.size === 0 ||
+          blob.size > ON_DEMAND_PREVIEW_CACHE_MAX_FILE_BYTES
+        ) {
+          return;
+        }
+
+        const objectUrl = URL.createObjectURL(blob);
+        setCachedPreviewUrls((prev) => {
+          if (prev[previewCacheKey]) {
+            URL.revokeObjectURL(objectUrl);
+            return prev;
+          }
+
+          const next = {
+            ...prev,
+            [previewCacheKey]: objectUrl,
+          };
+          cachedPreviewUrlsRef.current = next;
+          return next;
+        });
+      } catch {
+        if (!controller.signal.aborted) {
+          return;
+        }
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [previewCacheKey, previewFile, previewMimeType, previewUrl]);
+
+  useEffect(() => {
+    const selectedFile = selectedFiles[0];
+    if (!selectedFile) {
+      releaseTargetedVideoWarm();
+      return;
+    }
+
+    if (canWarmVideoWithoutProxy(selectedFile)) {
+      scheduleVideoWarm(selectedFile);
+      return;
+    }
+
+    releaseTargetedVideoWarm();
+  }, [
+    canWarmVideoWithoutProxy,
+    releaseTargetedVideoWarm,
+    scheduleVideoWarm,
+    selectedFiles,
+  ]);
 
   useEffect(() => {
     previewWarmAbortRef.current?.abort();
@@ -1254,7 +1860,7 @@ export default function FileGrid() {
       setCachedPreviewUrls({});
     }
 
-    if (loading || error || files.length === 0) {
+    if (!ENABLE_BACKGROUND_PREVIEW_WARMING || loading || error || files.length === 0) {
       return;
     }
 
@@ -1263,8 +1869,11 @@ export default function FileGrid() {
         const previewUrlForFile = buildPreviewUrl(
           file.id,
           file.provider,
+          file.accountId,
           file.name,
-          file.mimeType
+          file.mimeType,
+          file.previewUrl,
+          file.directUrl
         );
         const fileSize = file.size ? Number(file.size) : 0;
         return (
@@ -1307,8 +1916,11 @@ export default function FileGrid() {
           const previewUrlForFile = buildPreviewUrl(
             file.id,
             file.provider,
+            file.accountId,
             file.name,
-            file.mimeType
+            file.mimeType,
+            file.previewUrl,
+            file.directUrl
           );
           const fileSize = Number(file.size) || 0;
           const cacheKey = getPreviewCacheKey(file.id, file.provider);
@@ -1388,95 +2000,6 @@ export default function FileGrid() {
     loading,
   ]);
 
-  useEffect(() => {
-    const onKeyDown = async (event: KeyboardEvent) => {
-      const meta = event.metaKey || event.ctrlKey;
-      if (event.key === "Escape" && previewFile) {
-        event.preventDefault();
-        showPreview(null);
-      } else
-      if (meta && event.key === "1") {
-        event.preventDefault();
-        setViewMode("grid");
-      } else if (meta && event.key === "2") {
-        event.preventDefault();
-        setViewMode("list");
-      } else if (meta && event.key === "[") {
-        event.preventDefault();
-        navigateBack();
-      } else if (meta && event.key === "]") {
-        event.preventDefault();
-        navigateForward();
-      } else if (meta && event.shiftKey && event.key.toLowerCase() === "n") {
-        event.preventDefault();
-        startFolderFlow();
-      } else if (meta && event.key.toLowerCase() === "i") {
-        event.preventDefault();
-        if (selectedFiles[0]) showInfo(selectedFiles[0]);
-      } else if (event.key === " ") {
-        event.preventDefault();
-        if (previewFile) {
-          showPreview(null);
-        } else if (selectedFiles[0]) {
-          openInNewTab(selectedFiles[0].id);
-        }
-      } else if (meta && event.key.toLowerCase() === "d") {
-        event.preventDefault();
-        for (const item of selectedFiles) await duplicateFile(item.id);
-      } else if (meta && event.key.toLowerCase() === "c") {
-        event.preventDefault();
-        copySelection();
-      } else if (meta && event.key.toLowerCase() === "v") {
-        event.preventDefault();
-        await pasteIntoCurrentFolder();
-      } else if (meta && event.key === "Backspace") {
-        event.preventDefault();
-        if (selection.length > 0) setDeleteDialogOpen(true);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    copySelection,
-    duplicateFile,
-    navigateBack,
-    navigateForward,
-    openInNewTab,
-    pasteIntoCurrentFolder,
-    previewFile,
-    selectedFiles,
-    selection.length,
-    setViewMode,
-    showInfo,
-    showPreview,
-    startFolderFlow,
-  ]);
-
-  if (showInitialLoading) {
-    return (
-      <div className="flex h-full flex-1 items-center justify-center p-12 text-muted-foreground">
-        <div className="animate-pulse flex flex-col items-center">
-          <FolderIcon className="w-12 h-12 mb-4 opacity-50" />
-          <p>Loading...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="flex h-full flex-1 items-center justify-center p-12 text-center text-muted-foreground">
-        <div className="flex flex-col items-center justify-center max-w-sm">
-          <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mb-4">
-            <span className="text-red-500 text-xl font-bold">!</span>
-          </div>
-          <p className="text-red-400 font-medium mb-2">{error}</p>
-          {!currentLocationProvider && <p className="text-sm">Select a provider-connected folder to manage files.</p>}
-        </div>
-      </div>
-    );
-  }
-
   const filteredFiles = files
     .filter((file) =>
       file.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
@@ -1516,6 +2039,370 @@ export default function FileGrid() {
       }
     });
 
+  const visibleFileIds = filteredFiles.map((file) => file.id);
+  const visibleFileIdSet = new Set(visibleFileIds);
+  const resolvedActiveFileId =
+    activeFileId && visibleFileIdSet.has(activeFileId)
+      ? activeFileId
+      : [...selection]
+          .reverse()
+          .find((fileId) => visibleFileIdSet.has(fileId)) ||
+        filteredFiles[0]?.id ||
+        null;
+
+  const scrollFileIntoView = (fileId: string) => {
+    const node = itemRefs.current[fileId];
+    if (typeof node?.scrollIntoView !== "function") {
+      return;
+    }
+
+    node.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+    });
+  };
+
+  const getFallbackActiveFileId = () => {
+    return resolvedActiveFileId;
+  };
+
+  const getFallbackActiveFile = () => {
+    const fallbackId = getFallbackActiveFileId();
+    return (
+      filteredFiles.find((file) => file.id === fallbackId) || null
+    );
+  };
+
+  const selectSingleFile = (fileId: string) => {
+    selectionAnchorIdRef.current = fileId;
+    setActiveFileId(fileId);
+    setSelection([fileId]);
+    scrollFileIntoView(fileId);
+  };
+
+  const selectFileRange = (targetId: string) => {
+    const targetIndex = visibleFileIds.indexOf(targetId);
+    if (targetIndex < 0) {
+      return;
+    }
+
+    const anchorId =
+      selectionAnchorIdRef.current && visibleFileIdSet.has(selectionAnchorIdRef.current)
+        ? selectionAnchorIdRef.current
+        : getFallbackActiveFileId() || targetId;
+    const anchorIndex = visibleFileIds.indexOf(anchorId);
+    const rangeStart = Math.min(anchorIndex, targetIndex);
+    const rangeEnd = Math.max(anchorIndex, targetIndex);
+
+    selectionAnchorIdRef.current = anchorId;
+    setActiveFileId(targetId);
+    setSelection(visibleFileIds.slice(rangeStart, rangeEnd + 1));
+    scrollFileIntoView(targetId);
+  };
+
+  const getKeyboardActiveIndex = () => {
+    const fallbackActiveId = getFallbackActiveFileId();
+    return fallbackActiveId ? visibleFileIds.indexOf(fallbackActiveId) : -1;
+  };
+
+  const getKeyboardColumnCount = () => {
+    if (viewMode !== "grid" || filteredFiles.length <= 1) {
+      return 1;
+    }
+
+    const firstNode = itemRefs.current[filteredFiles[0]?.id || ""];
+    if (!firstNode) {
+      return 1;
+    }
+
+    const firstTop = firstNode.getBoundingClientRect().top;
+    let columnCount = 0;
+
+    for (const file of filteredFiles) {
+      const node = itemRefs.current[file.id];
+      if (!node) {
+        break;
+      }
+
+      const top = node.getBoundingClientRect().top;
+      if (Math.abs(top - firstTop) > 6) {
+        break;
+      }
+
+      columnCount += 1;
+    }
+
+    return Math.max(columnCount, 1);
+  };
+
+  const moveActiveSelection = (
+    direction: NavigationDirection,
+    extendSelection = false
+  ) => {
+    if (filteredFiles.length === 0) {
+      return;
+    }
+
+    const currentIndex = Math.max(getKeyboardActiveIndex(), 0);
+    const step =
+      direction === "up" || direction === "down"
+        ? getKeyboardColumnCount()
+        : 1;
+    let nextIndex = currentIndex;
+
+    if (direction === "left" || direction === "up") {
+      nextIndex = Math.max(0, currentIndex - step);
+    } else {
+      nextIndex = Math.min(filteredFiles.length - 1, currentIndex + step);
+    }
+
+    const targetId = filteredFiles[nextIndex]?.id;
+    if (!targetId) {
+      return;
+    }
+
+    if (extendSelection) {
+      selectFileRange(targetId);
+    } else {
+      selectSingleFile(targetId);
+    }
+  };
+
+  const activateFile = (file: CloudFile) => {
+    setMenu(null);
+
+    if (file.isFolder && !favoritesView) {
+      navigateToFolder(file.id, file.provider);
+      clearSelection();
+      selectionAnchorIdRef.current = null;
+      return;
+    }
+
+    openInNewTab(file.id);
+  };
+
+  const handleGridKeyDown = async (
+    event: ReactKeyboardEvent<HTMLDivElement>
+  ) => {
+    const meta = event.metaKey || event.ctrlKey;
+    const keyboardUiOpen = Boolean(
+      menu ||
+        previewFile ||
+        infoFile ||
+        renameDialog?.open ||
+        folderDialogOpen ||
+        deleteDialogOpen ||
+        targetDialogAction
+    );
+
+    if (event.key === "Escape") {
+      if (menu) {
+        event.preventDefault();
+        setMenu(null);
+        return;
+      }
+
+      if (previewFile) {
+        event.preventDefault();
+        showPreview(null);
+        return;
+      }
+
+      if (infoFile) {
+        event.preventDefault();
+        showInfo(null);
+        return;
+      }
+
+      if (renameDialog?.open || folderDialogOpen || deleteDialogOpen || targetDialogAction) {
+        return;
+      }
+
+      if (selection.length > 0) {
+        event.preventDefault();
+        clearSelection();
+      }
+      return;
+    }
+
+    if (event.key === " " && previewFile) {
+      event.preventDefault();
+      showPreview(null);
+      return;
+    }
+
+    if (isInteractiveKeyboardTarget(event.target, gridRef.current)) {
+      return;
+    }
+
+    if (keyboardUiOpen) {
+      return;
+    }
+
+    if (meta && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      if (visibleFileIds.length > 0) {
+        const anchorId = getFallbackActiveFileId() || visibleFileIds[0];
+        selectionAnchorIdRef.current = anchorId;
+        setActiveFileId(anchorId);
+        setSelection(visibleFileIds);
+        scrollFileIntoView(anchorId);
+      }
+      return;
+    }
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      moveActiveSelection("left", event.shiftKey);
+      return;
+    }
+
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      moveActiveSelection("right", event.shiftKey);
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveActiveSelection("up", event.shiftKey);
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveActiveSelection("down", event.shiftKey);
+      return;
+    }
+
+    if (event.key === "Home") {
+      event.preventDefault();
+      const firstFileId = filteredFiles[0]?.id;
+      if (firstFileId) {
+        if (event.shiftKey) {
+          selectFileRange(firstFileId);
+        } else {
+          selectSingleFile(firstFileId);
+        }
+      }
+      return;
+    }
+
+    if (event.key === "End") {
+      event.preventDefault();
+      const lastFileId = filteredFiles[filteredFiles.length - 1]?.id;
+      if (lastFileId) {
+        if (event.shiftKey) {
+          selectFileRange(lastFileId);
+        } else {
+          selectSingleFile(lastFileId);
+        }
+      }
+      return;
+    }
+
+    if (event.key === "Enter") {
+      const targetFile = getFallbackActiveFile();
+      if (!targetFile) {
+        return;
+      }
+
+      event.preventDefault();
+      if (!selection.includes(targetFile.id)) {
+        setSelection([targetFile.id]);
+      }
+      selectionAnchorIdRef.current = targetFile.id;
+      setActiveFileId(targetFile.id);
+      activateFile(targetFile);
+      return;
+    }
+
+    if (event.key === "Delete" || (!meta && event.key === "Backspace")) {
+      if (selection.length > 0) {
+        event.preventDefault();
+        setDeleteTargetIds(null);
+        setDeleteDialogOpen(true);
+      }
+      return;
+    }
+
+    if (meta && event.key === "1") {
+      event.preventDefault();
+      setViewMode("grid");
+    } else if (meta && event.key === "2") {
+      event.preventDefault();
+      setViewMode("list");
+    } else if (meta && event.key === "[") {
+      event.preventDefault();
+      navigateBack();
+    } else if (meta && event.key === "]") {
+      event.preventDefault();
+      navigateForward();
+    } else if (meta && event.shiftKey && event.key.toLowerCase() === "n") {
+      event.preventDefault();
+      startFolderFlow();
+    } else if (meta && event.key.toLowerCase() === "i") {
+      event.preventDefault();
+      const targetFile = getFallbackActiveFile();
+      if (targetFile) {
+        showInfo(targetFile);
+      }
+    } else if (event.key === " ") {
+      const targetFile = getFallbackActiveFile();
+      if (previewFile || targetFile) {
+        event.preventDefault();
+      }
+      if (previewFile) {
+        showPreview(null);
+      } else if (targetFile) {
+        openInNewTab(targetFile.id);
+      }
+    } else if (meta && event.key.toLowerCase() === "d") {
+      event.preventDefault();
+      const targets = selection.length > 0 ? selectedFiles : [];
+      for (const item of targets) {
+        await duplicateFile(item.id);
+      }
+    } else if (meta && event.key.toLowerCase() === "c") {
+      event.preventDefault();
+      copySelection();
+    } else if (meta && event.key.toLowerCase() === "v") {
+      event.preventDefault();
+      await pasteIntoCurrentFolder();
+    } else if (meta && event.key === "Backspace") {
+      if (selection.length > 0) {
+        event.preventDefault();
+        setDeleteTargetIds(null);
+        setDeleteDialogOpen(true);
+      }
+    }
+  };
+
+  if (showInitialLoading) {
+    return (
+      <div className="flex h-full flex-1 items-center justify-center p-12 text-muted-foreground">
+        <div className="animate-pulse flex flex-col items-center">
+          <FolderIcon className="w-12 h-12 mb-4 opacity-50" />
+          <p>Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-full flex-1 items-center justify-center p-12 text-center text-muted-foreground">
+        <div className="flex flex-col items-center justify-center max-w-sm">
+          <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mb-4">
+            <span className="text-red-500 text-xl font-bold">!</span>
+          </div>
+          <p className="text-red-400 font-medium mb-2">{error}</p>
+          {!currentLocationProvider && <p className="text-sm">Select a provider-connected folder to manage files.</p>}
+        </div>
+      </div>
+    );
+  }
+
   if (filteredFiles.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center p-12 h-full">
@@ -1532,12 +2419,27 @@ export default function FileGrid() {
     );
   }
 
-  const handleSelect = (id: string, isCtrl: boolean) => {
-    if (isCtrl) {
-      setSelection(selection.includes(id) ? selection.filter(s => s !== id) : [...selection, id]);
-    } else {
-      setSelection([id]);
+  const handleSelect = (id: string, isCtrl: boolean, isShift: boolean) => {
+    focusGrid();
+
+    if (isShift) {
+      selectFileRange(id);
+      return;
     }
+
+    if (isCtrl) {
+      selectionAnchorIdRef.current = id;
+      setActiveFileId(id);
+      setSelection(
+        selection.includes(id)
+          ? selection.filter((selectedId) => selectedId !== id)
+          : [...selection, id]
+      );
+      scrollFileIntoView(id);
+      return;
+    }
+
+    selectSingleFile(id);
   };
 
   const selectedOrTarget = (targetId: string | null) => {
@@ -1651,8 +2553,30 @@ export default function FileGrid() {
   return (
     <div
       ref={gridRef}
-      className={`${densityStyles.rootPadding} min-h-full relative`}
-      onClick={() => {
+      aria-activedescendant={
+        resolvedActiveFileId ? getKeyboardItemId(resolvedActiveFileId) : undefined
+      }
+      aria-label="Files"
+      aria-multiselectable="true"
+      className={`${densityStyles.rootPadding} min-h-full relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 focus-visible:ring-inset`}
+      onFocus={(event) => {
+        if (event.target !== gridRef.current || filteredFiles.length === 0) {
+          return;
+        }
+
+        const fallbackActiveId =
+          getFallbackActiveFileId() || filteredFiles[0]?.id;
+        if (fallbackActiveId) {
+          setActiveFileId(fallbackActiveId);
+        }
+      }}
+      onClick={(event) => {
+        if (
+          event.target instanceof HTMLElement &&
+          !event.target.closest("[role='dialog']")
+        ) {
+          focusGrid();
+        }
         if (suppressClearClickRef.current) {
           suppressClearClickRef.current = false;
           return;
@@ -1661,6 +2585,7 @@ export default function FileGrid() {
         setMenu(null);
       }}
       onMouseDown={handleCanvasMouseDown}
+      onKeyDown={handleGridKeyDown}
       onDragEnter={(e) => {
         if (!canAcceptExternalUpload || !isExternalFileDrag(e)) return;
         e.preventDefault();
@@ -1696,8 +2621,11 @@ export default function FileGrid() {
       }}
       onContextMenu={(e) => {
         e.preventDefault();
+        focusGrid();
         setMenu({ x: e.clientX, y: e.clientY, fileId: null });
       }}
+      role="listbox"
+      tabIndex={0}
     >
       {dropActive && (
         <div
@@ -1741,6 +2669,7 @@ export default function FileGrid() {
       >
         {filteredFiles.map((file) => {
           const isSelected = selection.includes(file.id);
+          const isActive = resolvedActiveFileId === file.id;
           const favorite = isFavorite(file.id, file.provider);
           const nameParts = getNameParts(file);
           return (
@@ -1750,16 +2679,36 @@ export default function FileGrid() {
                 itemRefs.current[file.id] = node;
               }}
               data-file-item="true"
+              id={getKeyboardItemId(file.id)}
+              aria-selected={isSelected}
               data-selected={isSelected ? "true" : "false"}
               draggable={!file.isFolder}
               className={`motion-file-item cursor-default transition-colors group select-none ${
                 viewMode === "grid"
                   ? `flex flex-col items-center ${densityStyles.gridItem}`
                   : `flex items-center ${densityStyles.listItem}`
-              } ${isSelected ? "bg-blue-500/20 ring-1 ring-blue-500/50" : "hover:bg-hover"}`}
+              } ${
+                isSelected
+                  ? "bg-blue-500/20 ring-1 ring-blue-500/50"
+                  : "hover:bg-hover"
+              } ${
+                isActive
+                  ? "shadow-[0_0_0_1px_rgba(191,219,254,0.55)]"
+                  : ""
+              }`}
               onClick={(e) => {
                 e.stopPropagation();
-                handleSelect(file.id, e.ctrlKey || e.metaKey);
+                handleSelect(file.id, e.ctrlKey || e.metaKey, e.shiftKey);
+              }}
+              onPointerDown={() => {
+                if (!file.isFolder) {
+                  warmVideoOnPointerDown(file);
+                }
+              }}
+              onMouseEnter={() => {
+                if (!file.isFolder) {
+                  scheduleVideoWarm(file);
+                }
               }}
               onDragStart={(e) => {
                 if (file.isFolder || !currentLocationProvider) {
@@ -1775,7 +2724,9 @@ export default function FileGrid() {
                   file.id,
                   file.provider,
                   file.name,
-                  file.mimeType
+                  file.mimeType,
+                  file.downloadUrl,
+                  file.directUrl
                 );
                 if (downloadUrl) {
                   e.dataTransfer.setData(
@@ -1788,21 +2739,20 @@ export default function FileGrid() {
               }}
               onDoubleClick={(e) => {
                 e.stopPropagation();
-                if (file.isFolder && !favoritesView) {
-                  navigateToFolder(file.id, file.provider);
-                  clearSelection();
-                } else {
-                  openInNewTab(file.id);
-                }
+                activateFile(file);
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                focusGrid();
+                selectionAnchorIdRef.current = file.id;
+                setActiveFileId(file.id);
                 if (!selection.includes(file.id)) {
                   setSelection([file.id]);
                 }
                 setMenu({ x: e.clientX, y: e.clientY, fileId: file.id });
               }}
+              role="option"
             >
               <div
                 className={`relative flex items-center justify-center ${
@@ -1833,8 +2783,11 @@ export default function FileGrid() {
                           src={resolvePreviewUrl(
                             file.id,
                             file.provider,
+                            file.accountId,
                             file.name,
-                            file.mimeType
+                            file.mimeType,
+                            file.previewUrl,
+                            file.directUrl
                           )}
                           alt={file.name}
                           className="h-full w-full object-cover"
@@ -1842,20 +2795,37 @@ export default function FileGrid() {
                       </div>
                     ) : isVideoFile(file.mimeType) && providerForFile(file.provider) ? (
                       <div
-                        className={`overflow-hidden border border-border bg-surface shadow-md ${
+                        className={`overflow-hidden border border-border bg-surface-elevated shadow-md ${
                           viewMode === "grid"
                             ? sizeStyles.gridPreviewBox
                             : sizeStyles.listPreviewBox
                         }`}
                       >
                         <VideoThumbnail
+                          key={
+                            resolvePreviewUrl(
+                              file.id,
+                              file.provider,
+                              file.accountId,
+                              file.name,
+                              file.mimeType,
+                              file.previewUrl,
+                              file.directUrl
+                            ) ?? file.id
+                          }
                           src={resolvePreviewUrl(
                             file.id,
                             file.provider,
+                            file.accountId,
                             file.name,
-                            file.mimeType
+                            file.mimeType,
+                            file.previewUrl,
+                            file.directUrl
                           )}
                           className="h-full w-full object-cover"
+                          iconClassName={
+                            viewMode === "grid" ? "h-6 w-6" : "h-4 w-4"
+                          }
                         />
                       </div>
                     ) : (
@@ -1976,14 +2946,17 @@ export default function FileGrid() {
                         target.id,
                         target.provider,
                         target.name,
-                        target.mimeType
+                        target.mimeType,
+                        target.downloadUrl,
+                        target.directUrl
                       );
                   if (!downloadUrl) return;
                   window.open(
                     target.isFolder
                       ? downloadUrl
                       : downloadUrl,
-                    "_blank"
+                    "_blank",
+                    "noopener,noreferrer"
                   );
                   setMenu(null);
                 }}
@@ -2025,6 +2998,12 @@ export default function FileGrid() {
             </>
           ) : (
             <>
+                <button
+                  className="w-full cursor-pointer rounded-lg px-3 py-1.5 text-left text-[13px] text-foreground transition-colors hover:bg-hover"
+                  onClick={startFileFlow}
+                >
+                  New File
+                </button>
                 <button
                   className="w-full cursor-pointer rounded-lg px-3 py-1.5 text-left text-[13px] text-foreground transition-colors hover:bg-hover"
                   onClick={startFolderFlow}
@@ -2071,7 +3050,7 @@ export default function FileGrid() {
         {previewFile && providerForFile(previewFile.provider) ? (
           <motion.div
             animate={{ opacity: 1 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-overlay-strong backdrop-blur-sm"
+            className={modalOverlayStrongClass}
             exit={{ opacity: 0 }}
             initial={{ opacity: 0 }}
             onClick={() => showPreview(null)}
@@ -2079,18 +3058,25 @@ export default function FileGrid() {
           >
             <motion.div
               animate={{ opacity: 1, scale: 1, y: 0 }}
+              aria-describedby="finder-preview-file-type"
+              aria-labelledby="finder-preview-file-name"
+              aria-modal="true"
               className="relative flex h-[86vh] w-[88vw] max-w-6xl min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl"
               exit={{ opacity: 0, scale: 0.985, y: 20 }}
               initial={{ opacity: 0, scale: 0.96, y: 28 }}
               onClick={(e) => e.stopPropagation()}
+              role="dialog"
               transition={panelTransition}
             >
             <div className="flex items-center justify-between border-b border-border bg-window-chrome px-4 py-3">
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-foreground">
+                <p
+                  className="truncate text-sm font-semibold text-foreground"
+                  id="finder-preview-file-name"
+                >
                   {previewFile.name}
                 </p>
-                <p className="truncate text-xs text-muted">
+                <p className="truncate text-xs text-muted" id="finder-preview-file-type">
                   {previewFile.mimeType}
                 </p>
               </div>
@@ -2099,6 +3085,8 @@ export default function FileGrid() {
                   <a
                     href={previewDownloadUrl}
                     className="rounded-md border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-hover"
+                    download={previewFile.name}
+                    referrerPolicy="no-referrer"
                   >
                     Download
                   </a>
@@ -2113,35 +3101,37 @@ export default function FileGrid() {
               </div>
             </div>
             <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-window-pane p-4">
-              {isImageFile(previewFile.mimeType) && previewUrl ? (
+              {previewMimeType && isImageFile(previewMimeType) && previewUrl ? (
                 <div className="flex max-h-full max-w-full items-center justify-center overflow-hidden">
                   <img
                     src={previewUrl}
                     alt={previewFile.name}
                     className="h-auto max-h-[calc(86vh-6rem)] w-auto max-w-[calc(88vw-2rem)] rounded-lg object-contain shadow-2xl"
+                    referrerPolicy="no-referrer"
                   />
                 </div>
-              ) : isVideoFile(previewFile.mimeType) && previewUrl ? (
+              ) : previewMimeType && isVideoFile(previewMimeType) && previewUrl ? (
                 <div className="flex max-h-full max-w-full items-center justify-center overflow-hidden">
-                  <video
-                    src={previewUrl}
-                    controls
-                    autoPlay
+                  <VideoPreviewPlayer
+                    key={`${previewPlaybackPrimaryUrl ?? ""}|${previewUrl ?? ""}`}
+                    primarySrc={previewPlaybackPrimaryUrl}
+                    fallbackSrc={previewUrl}
                     className="h-auto max-h-[calc(86vh-6rem)] w-auto max-w-[calc(88vw-2rem)] rounded-lg bg-surface-elevated object-contain shadow-2xl"
                   />
                 </div>
-              ) : isAudioFile(previewFile.mimeType) && previewUrl ? (
-                <audio
-                  src={previewUrl}
-                  controls
-                  autoPlay
+              ) : previewMimeType && isAudioFile(previewMimeType) && previewUrl ? (
+                <AudioPreviewPlayer
+                  key={`${previewPlaybackPrimaryUrl ?? ""}|${previewUrl ?? ""}`}
+                  primarySrc={previewPlaybackPrimaryUrl}
+                  fallbackSrc={previewUrl}
                   className="w-full max-w-2xl"
                 />
-              ) : isPdfFile(previewFile.mimeType) && previewUrl ? (
+              ) : previewMimeType && isPdfFile(previewMimeType) && resolvedDocumentPreviewUrl ? (
                 <iframe
-                  src={previewUrl}
+                  src={resolvedDocumentPreviewUrl}
                   className="h-full max-h-full w-full max-w-full rounded-lg border border-border bg-white"
                   title={previewFile.name}
+                  referrerPolicy="no-referrer"
                 />
               ) : richPreviewLoading ? (
                 <div className="flex flex-col items-center gap-3 text-center">
@@ -2201,27 +3191,51 @@ export default function FileGrid() {
                   </div>
                 </div>
               ) : richPreview?.kind === "text" ? (
-                <div className="h-full w-full overflow-auto rounded-lg border border-border bg-window-chrome p-4">
-                  <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-6 text-foreground">
-                    {richPreview.text}
-                  </pre>
+                <div className="h-full w-full overflow-auto rounded-lg border border-border bg-window-chrome scrollbar-thin scrollbar-thumb-muted">
+                  {richPreview.language === "markdown" ? (
+                    <div className="mx-auto max-w-3xl p-8 sm:p-12">
+                      <div className="prose prose-invert prose-neutral max-w-none">
+                        <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-7 text-foreground/90">
+                          {richPreview.text}
+                        </pre>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-4 font-mono text-[13px] leading-6">
+                      <pre className="whitespace-pre break-all text-foreground/80">
+                  {richPreview.text}
+                      </pre>
+                    </div>
+                  )}
                 </div>
               ) : (
-                <div className="flex flex-col items-center gap-4 text-center">
-                  <DocumentIcon className="h-20 w-20 text-muted" />
-                  <div>
-                    <p className="text-sm font-medium text-foreground">
-                      {richPreviewError || "This file type cannot be previewed here."}
+                <div className="flex flex-col items-center gap-6 px-4 py-12 text-center">
+                  <div className="relative">
+                    <DocumentIcon className="h-20 w-20 text-muted/20" />
+                    <div className="absolute -bottom-1 -right-1 rounded-full bg-background p-1">
+                      <div className="rounded-full bg-red-500/10 p-1.5">
+                        <svg className="h-4 w-4 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="max-w-xs">
+                    <p className="text-base font-semibold text-foreground">
+                      {richPreviewError || "Preview unavailable"}
                     </p>
-                    <p className="mt-1 text-xs text-muted">
-                      Download it or open it with the system viewer.
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      We couldn't generate a preview for this file. You can still download it to view it locally.
                     </p>
                   </div>
                   {previewDownloadUrl ? (
                     <a
                       href={previewDownloadUrl}
-                      className="rounded-md border border-border bg-surface-elevated px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-hover"
+                      className="inline-flex items-center gap-2 rounded-lg bg-foreground px-6 py-2.5 text-sm font-semibold text-background transition-all hover:opacity-90 active:scale-95"
                     >
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} />
+                      </svg>
                       Download File
                     </a>
                   ) : null}
@@ -2268,7 +3282,7 @@ export default function FileGrid() {
         {renameDialog?.open ? (
           <motion.div
             animate={{ opacity: 1 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-overlay px-4 backdrop-blur-sm"
+            className={modalOverlayClass}
             exit={{ opacity: 0 }}
             initial={{ opacity: 0 }}
             transition={overlayTransition}
@@ -2326,7 +3340,7 @@ export default function FileGrid() {
         {folderDialogOpen ? (
           <motion.div
             animate={{ opacity: 1 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-overlay px-4 backdrop-blur-sm"
+            className={modalOverlayClass}
             exit={{ opacity: 0 }}
             initial={{ opacity: 0 }}
             transition={overlayTransition}
@@ -2393,18 +3407,94 @@ export default function FileGrid() {
             </motion.div>
           </motion.div>
         ) : null}
+        {fileDialogOpen ? (
+          <motion.div
+            animate={{ opacity: 1 }}
+            className={modalOverlayClass}
+            exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }}
+            transition={overlayTransition}
+          >
+            <motion.div
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              aria-busy={createSubmitting}
+              aria-modal="true"
+              className="w-full max-w-[420px] rounded-xl border border-border bg-surface p-5"
+              exit={{ opacity: 0, scale: 0.985, y: 16 }}
+              initial={{ opacity: 0, scale: 0.96, y: 22 }}
+              role="dialog"
+              transition={panelTransition}
+            >
+            <h3 className="mb-3 text-lg font-semibold">Create File</h3>
+            {pendingFileTargetLabel ? (
+              <p className="mb-3 text-sm text-muted-foreground">
+                Create in {pendingFileTargetLabel.providerLabel} / {pendingFileTargetLabel.accountLabel}
+              </p>
+            ) : null}
+            <input
+              value={newFileName}
+              disabled={createSubmitting}
+              onChange={(e) => setNewFileName(e.target.value)}
+              className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm transition-colors focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60"
+              placeholder="File name (e.g. note.txt)"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                className={dialogSecondaryButtonClass}
+                disabled={createSubmitting}
+                onClick={() => {
+                  setFileDialogOpen(false);
+                  setPendingFileTarget(null);
+                }}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className={dialogPrimaryButtonClass}
+                disabled={createSubmitting}
+                onClick={async () => {
+                  if (createSubmitting) return;
+                  setCreateSubmitting(true);
+                  try {
+                    const name = newFileName || "New File.txt";
+                    const blob = new Blob([""], { type: "text/plain" });
+                    const file = new File([blob], name, { type: "text/plain" });
+                    
+                    await uploadFiles([file], pendingFileTarget || undefined);
+                    
+                    setFileDialogOpen(false);
+                    setNewFileName("");
+                    setPendingFileTarget(null);
+                  } finally {
+                    setCreateSubmitting(false);
+                  }
+                }}
+                type="button"
+              >
+                {createSubmitting ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : null}
+                {createSubmitting ? "Creating..." : "Create"}
+              </button>
+            </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
       </AnimatePresence>
       <CloudActionTargetDialog
         open={targetDialogAction !== null}
         title={
           targetDialogAction === "folder"
             ? "Choose Folder Destination"
-            : "Choose Upload Destination"
+            : targetDialogAction === "file"
+              ? "Choose File Destination"
+              : "Choose Upload Destination"
         }
         description={
           targetDialogAction === "folder"
             ? "Pick which connected account should receive the new folder."
-            : "Pick which connected account should receive the uploaded files."
+            : targetDialogAction === "file"
+              ? "Pick which connected account should receive the new file."
+              : "Pick which connected account should receive the uploaded files."
         }
         options={actionTargetOptions}
         onClose={() => {
@@ -2417,7 +3507,7 @@ export default function FileGrid() {
         {deleteDialogOpen ? (
           <motion.div
             animate={{ opacity: 1 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-overlay px-4 backdrop-blur-sm"
+            className={modalOverlayClass}
             exit={{ opacity: 0 }}
             initial={{ opacity: 0 }}
             transition={overlayTransition}

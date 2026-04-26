@@ -57,7 +57,7 @@ describe("Toolbar", () => {
     expect(state.navigateBack).toHaveBeenCalled();
     expect(state.navigateForward).toHaveBeenCalled();
 
-    await userEvent.click(screen.getByRole("button", { name: /files/i }));
+    await userEvent.click(screen.getAllByRole("button", { name: /^files$/i })[0]!);
     expect(state.navigateToBreadcrumb).toHaveBeenCalledWith(0);
   });
 

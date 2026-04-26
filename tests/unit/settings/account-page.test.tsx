@@ -23,9 +23,7 @@ describe("AccountPage", () => {
       })
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({
-          subdomain: "new-name",
-        }),
+        json: async () => ({ success: true }),
       });
 
     render(<AccountPage />);
@@ -38,8 +36,8 @@ describe("AccountPage", () => {
     fireEvent.submit(screen.getByRole("button", { name: /save profile/i }).closest("form")!);
 
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith("/api/subdomain/change", expect.objectContaining({
-        method: "POST",
+      expect(fetchMock).toHaveBeenCalledWith("/api/settings/me", expect.objectContaining({
+        method: "PATCH",
       }))
     );
     expect(await screen.findByText(/profile updated/i)).toBeInTheDocument();
@@ -64,9 +62,9 @@ describe("AccountPage", () => {
 
     const { container } = render(<AccountPage />);
 
-    await screen.findByDisplayValue("musti");
+    await screen.findByLabelText(/username/i);
     const passwordInputs = container.querySelectorAll('input[type="password"]');
-    await userEvent.type(passwordInputs[0]!, "old-pass");
+    await userEvent.type(passwordInputs[0]!, "NewPassword1");
     await userEvent.type(passwordInputs[1]!, "NewPassword1");
     fireEvent.submit(screen.getByRole("button", { name: /update password/i }).closest("form")!);
 
@@ -91,9 +89,9 @@ describe("AccountPage", () => {
 
     const { container } = render(<AccountPage />);
 
-    await screen.findByDisplayValue("musti");
+    await screen.findByLabelText(/username/i);
     const passwordInputs = container.querySelectorAll('input[type="password"]');
-    await userEvent.type(passwordInputs[0]!, "old-pass");
+    await userEvent.type(passwordInputs[0]!, "alllowercase12");
     await userEvent.type(passwordInputs[1]!, "alllowercase12");
     fireEvent.submit(screen.getByRole("button", { name: /update password/i }).closest("form")!);
 

@@ -38,6 +38,7 @@ export interface UploadTuning {
   onedriveChunkSize: number;
   maxParallelUploads: number;
   sessionPrewarmLimit: number;
+  sessionBatchSize: number;
 }
 
 export function getUploadTuning(
@@ -53,6 +54,7 @@ export function getUploadTuning(
   let googleChunkSize = GOOGLE_BALANCED_CHUNK_SIZE;
   let onedriveChunkSize = ONEDRIVE_BALANCED_CHUNK_SIZE;
   let maxParallelUploads = 4;
+  let sessionPrewarmLimit = 0;
 
   if (saveData || effectiveType === "slow-2g" || effectiveType === "2g") {
     googleChunkSize = GOOGLE_SLOW_CHUNK_SIZE;
@@ -76,16 +78,27 @@ export function getUploadTuning(
     maxParallelUploads = Math.min(maxParallelUploads, normalizedFileCount);
   }
 
-  const sessionPrewarmLimit =
-    normalizedFileCount === 0
-      ? 0
-      : Math.min(normalizedFileCount, Math.max(maxParallelUploads * 2, 4));
+  if (normalizedFileCount > 0) {
+    if (saveData || effectiveType === "slow-2g" || effectiveType === "2g") {
+      sessionPrewarmLimit = maxParallelUploads;
+    } else if (effectiveType === "3g" || (downlinkMbps !== null && downlinkMbps < 10)) {
+      sessionPrewarmLimit = maxParallelUploads + 2;
+    } else {
+      sessionPrewarmLimit = maxParallelUploads * 2;
+    }
+
+    sessionPrewarmLimit = Math.min(normalizedFileCount, Math.max(sessionPrewarmLimit, 2));
+  }
+
+  const sessionBatchSize =
+    normalizedFileCount === 0 ? 0 : Math.min(normalizedFileCount, sessionPrewarmLimit);
 
   return {
     googleChunkSize,
     onedriveChunkSize,
     maxParallelUploads: Math.max(1, maxParallelUploads),
-    sessionPrewarmLimit,
+    sessionPrewarmLimit: Math.max(0, sessionPrewarmLimit),
+    sessionBatchSize,
   };
 }
 

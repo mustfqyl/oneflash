@@ -8,7 +8,6 @@ import {
   createRateLimitResponse,
   ensureTrustedOrigin,
 } from "@/lib/security";
-import { addSubdomain, removeSubdomain } from "@/lib/vercel";
 
 export async function POST(req: NextRequest) {
   try {
@@ -68,13 +67,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Subdomain already taken" }, { status: 409 });
     }
 
-    // Update Vercel
-    if (user.customDomain) {
-      await removeSubdomain(user.customDomain);
-    }
-    await addSubdomain(formatted);
-
-    // Update DB
     await prisma.user.update({
       where: { id: user.id },
       data: { customDomain: formatted },

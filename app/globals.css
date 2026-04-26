@@ -356,3 +356,30 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--thumb-hover);
 }
+
+/* Markdown Reader Styles */
+.prose {
+  color: var(--foreground);
+  font-family: var(--font-dm-sans), sans-serif;
+}
+
+.prose pre {
+  background: var(--surface-elevated);
+  padding: 1.5rem;
+  border-radius: 0.75rem;
+  border: 1px border var(--border);
+  margin: 1.5rem 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.prose h1, .prose h2, .prose h3 {
+  color: var(--foreground);
+  font-weight: 700;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+}
+
+.prose p {
+  margin-bottom: 1.25rem;
+  line-height: 1.75;
+}

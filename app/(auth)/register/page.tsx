@@ -215,7 +215,7 @@ export default function RegisterPage() {
               </div>
             )}
 
-            <div className="pt-2">
+            <div className="space-y-3 pt-2">
               <button
                 type="submit"
                 disabled={loading}
@@ -226,6 +226,33 @@ export default function RegisterPage() {
                   <ArrowRightIcon className="w-4 h-4 ml-2 group-hover:translate-x-1 transition-transform" />
                 )}
               </button>
+              <p className="text-center text-xs leading-5 text-muted">
+                By creating an account, you agree to our{" "}
+                <Link
+                  href="/terms"
+                  prefetch={false}
+                  className="font-medium text-blue-500 hover:text-blue-400"
+                >
+                  Terms of Service
+                </Link>{" "}
+                and{" "}
+                <Link
+                  href="/privacy"
+                  prefetch={false}
+                  className="font-medium text-blue-500 hover:text-blue-400"
+                >
+                  Privacy Policy
+                </Link>
+                ,{" "}
+                <Link
+                  href="/what-is-this"
+                  prefetch={false}
+                  className="font-medium text-blue-500 hover:text-blue-400"
+                >
+                  What Is This?
+                </Link>
+                .
+              </p>
             </div>
           </form>
         </div>

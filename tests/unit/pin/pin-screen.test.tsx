@@ -17,7 +17,7 @@ describe("PinScreen", () => {
       json: async () => ({ success: true }),
     });
 
-    render(<PinScreen subdomain="musti" onSuccess={onSuccess} />);
+    render(<PinScreen subdomain="musti" rootDomain="example.com" onSuccess={onSuccess} />);
 
     await userEvent.click(screen.getByLabelText(/trust this device/i));
     await userEvent.type(screen.getByRole("textbox"), "123456");
@@ -41,7 +41,7 @@ describe("PinScreen", () => {
       json: async () => ({ success: false }),
     });
 
-    render(<PinScreen subdomain="musti" onSuccess={onSuccess} />);
+    render(<PinScreen subdomain="musti" rootDomain="example.com" onSuccess={onSuccess} />);
 
     await userEvent.type(screen.getByRole("textbox"), "123456");
 

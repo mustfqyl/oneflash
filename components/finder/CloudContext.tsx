@@ -23,6 +23,7 @@ import {
 import { getBrowserUploadTuning } from "@/lib/upload-tuning";
 
 export type CloudProviderId = "google" | "onedrive";
+const MAX_PREVIEW_SIZE = 100 * 1024 * 1024; // 100MB
 
 export interface ConnectedCloudAccount {
   id: string;
@@ -42,10 +43,16 @@ export interface CloudFile {
   id: string;
   name: string;
   mimeType: string;
+  previewMimeType?: string | null;
   size?: string;
   modifiedTime?: string;
   isFolder: boolean;
   iconLink?: string;
+  directUrl?: string | null;
+  previewUrl?: string | null;
+  downloadUrl?: string | null;
+  viewerUrl?: string | null;
+  thumbnailUrl?: string | null;
   provider?: CloudProviderId | null;
   accountId?: string | null;
   accountEmail?: string | null;
@@ -55,12 +62,18 @@ interface ProviderApiFile {
   id: string;
   name: string;
   mimeType?: string;
+  previewMimeType?: string | null;
   size?: string | number;
   modifiedTime?: string;
   lastModifiedDateTime?: string;
   file?: { mimeType?: string };
   folder?: unknown;
   iconLink?: string;
+  directUrl?: string | null;
+  previewUrl?: string | null;
+  downloadUrl?: string | null;
+  viewerUrl?: string | null;
+  thumbnailUrl?: string | null;
   accountId?: string | null;
   accountEmail?: string | null;
 }
@@ -125,6 +138,10 @@ interface UploadSessionPayload {
   expirationDateTime?: string | null;
 }
 
+interface UploadSessionBatchPayload {
+  sessions: UploadSessionPayload[];
+}
+
 interface UploadSourceItem {
   file: File;
   relativePath?: string;
@@ -158,6 +175,7 @@ interface DirectUploadManager {
   smoothedSpeed: number;
   maxParallelUploads: number;
   sessionPrewarmLimit: number;
+  sessionBatchSize: number;
 }
 
 interface CloudContextType {
@@ -368,10 +386,23 @@ function persistFavorites(
   nextFavoriteItems: FavoriteStorageMap
 ) {
   if (typeof window === "undefined") return;
+  const serializedFavoriteItems = Object.fromEntries(
+    Object.entries(nextFavoriteItems).map(([key, file]) => [
+      key,
+      {
+        ...file,
+        directUrl: null,
+        previewUrl: null,
+        downloadUrl: null,
+        viewerUrl: null,
+        thumbnailUrl: null,
+      },
+    ])
+  );
   window.localStorage.setItem("finder_favorites", JSON.stringify(nextFavorites));
   window.localStorage.setItem(
     "finder_favorite_items",
-    JSON.stringify(nextFavoriteItems)
+    JSON.stringify(serializedFavoriteItems)
   );
 }
 
@@ -683,6 +714,7 @@ export function CloudProvider({ children }: { children: ReactNode }) {
         f.name,
         f.mimeType || f.file?.mimeType || "application/octet-stream"
       ),
+      previewMimeType: f.previewMimeType ?? null,
       size: typeof f.size === "number" ? String(f.size) : f.size,
       modifiedTime: f.modifiedTime || f.lastModifiedDateTime,
       provider: sourceProvider,
@@ -693,6 +725,11 @@ export function CloudProvider({ children }: { children: ReactNode }) {
           ? f.mimeType === "application/vnd.google-apps.folder"
           : !!f.folder,
       iconLink: f.iconLink,
+      directUrl: f.directUrl ?? null,
+      previewUrl: f.previewUrl ?? null,
+      downloadUrl: f.downloadUrl ?? null,
+      viewerUrl: f.viewerUrl ?? null,
+      thumbnailUrl: f.thumbnailUrl ?? null,
     }),
     []
   );
@@ -1388,34 +1425,61 @@ export function CloudProvider({ children }: { children: ReactNode }) {
     return normalizeProviderFile(data.file as ProviderApiFile, targetProvider);
   }, [normalizeProviderFile]);
 
-  const createDirectUploadSession = useCallback(async (
+  const createDirectUploadSessions = useCallback(async (
     targetProvider: CloudProviderId,
-    file: File,
-    folderId: string
+    tasks: DirectUploadTask[]
   ) => {
+    if (tasks.length === 0) {
+      return [];
+    }
+
+    const requestItems = tasks.map((task) => ({
+      name: task.file.name,
+      mimeType: resolveFileMimeType(task.file.name, task.file.type),
+      size: task.file.size,
+      folderId: task.targetFolderId,
+      accountId: getScopedCloudAccountId(task.targetFolderId),
+    }));
+
     const response = await fetch(`/api/cloud/${targetProvider}/upload-session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: file.name,
-        mimeType: resolveFileMimeType(file.name, file.type),
-        size: file.size,
-        folderId,
-        accountId: getScopedCloudAccountId(folderId),
-      }),
+      body: JSON.stringify(
+        requestItems.length === 1 ? requestItems[0] : { files: requestItems }
+      ),
     });
     const data = (await response.json().catch(() => null)) as
       | UploadSessionPayload
+      | UploadSessionBatchPayload
       | { error?: string }
       | null;
 
-    if (!response.ok || !data || !("uploadUrl" in data) || !data.uploadUrl) {
+    if (!response.ok) {
       throw new Error(
         (data && "error" in data && data.error) || "Failed to create upload session"
       );
     }
 
-    return data;
+    if (tasks.length === 1) {
+      if (data && "uploadUrl" in data && data.uploadUrl) {
+        return [data];
+      }
+
+      throw new Error("Failed to create upload session");
+    }
+
+    if (data && "sessions" in data && Array.isArray(data.sessions)) {
+      const sessions = data.sessions.filter(
+        (entry): entry is UploadSessionPayload =>
+          Boolean(entry?.uploadUrl && typeof entry.uploadUrl === "string")
+      );
+
+      if (sessions.length === tasks.length) {
+        return sessions;
+      }
+    }
+
+    throw new Error("Failed to create upload sessions");
   }, []);
 
   const ensureDirectUploadSession = useCallback(async (task: DirectUploadTask) => {
@@ -1424,12 +1488,13 @@ export function CloudProvider({ children }: { children: ReactNode }) {
     }
 
     if (!task.sessionPromise) {
-      task.sessionPromise = createDirectUploadSession(
-        task.provider,
-        task.file,
-        task.targetFolderId
-      )
-        .then((session) => {
+      task.sessionPromise = createDirectUploadSessions(task.provider, [task])
+        .then((sessions) => {
+          const session = sessions[0];
+          if (!session?.uploadUrl) {
+            throw new Error("Failed to create upload session");
+          }
+
           task.uploadUrl = session.uploadUrl;
           return session;
         })
@@ -1441,10 +1506,14 @@ export function CloudProvider({ children }: { children: ReactNode }) {
 
     const session = await task.sessionPromise;
     return session.uploadUrl;
-  }, [createDirectUploadSession]);
+  }, [createDirectUploadSessions]);
 
   const warmUploadSessions = useCallback((manager: DirectUploadManager) => {
-    if (manager.status !== "running" || manager.sessionPrewarmLimit <= 0) {
+    if (
+      manager.status !== "running" ||
+      manager.sessionPrewarmLimit <= 0 ||
+      manager.sessionBatchSize <= 0
+    ) {
       return;
     }
 
@@ -1459,26 +1528,45 @@ export function CloudProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    for (const task of manager.tasks) {
-      if (manager.status !== "running" || warmedTaskCount >= manager.sessionPrewarmLimit) {
-        return;
-      }
+    const remainingSlots = manager.sessionPrewarmLimit - warmedTaskCount;
+    const tasksToWarm = manager.tasks
+      .filter(
+        (task) =>
+          task.file.size > 0 &&
+          task.status === "pending" &&
+          !task.uploadUrl &&
+          !task.sessionPromise
+      )
+      .slice(0, Math.min(remainingSlots, manager.sessionBatchSize));
 
-      if (
-        task.file.size === 0 ||
-        task.status === "completed" ||
-        task.uploadUrl ||
-        task.sessionPromise
-      ) {
-        continue;
-      }
-
-      warmedTaskCount += 1;
-      void ensureDirectUploadSession(task).catch(() => {
-        // The worker will surface the real error when it reaches this task.
-      });
+    if (tasksToWarm.length === 0) {
+      return;
     }
-  }, [ensureDirectUploadSession]);
+
+    warmedTaskCount += tasksToWarm.length;
+
+    const batchPromise = createDirectUploadSessions(manager.provider, tasksToWarm);
+    tasksToWarm.forEach((task, index) => {
+      task.sessionPromise = batchPromise
+        .then((sessions) => {
+          const session = sessions[index];
+          if (!session?.uploadUrl) {
+            throw new Error("Failed to create upload session");
+          }
+
+          task.uploadUrl = session.uploadUrl;
+          return session;
+        })
+        .catch((error) => {
+          task.sessionPromise = null;
+          throw error;
+        });
+    });
+
+    void batchPromise.catch(() => {
+      // The worker awaiting a given task will surface the real error.
+    });
+  }, [createDirectUploadSessions]);
 
   const verifyUploadedFileInFolder = useCallback(async (
     targetProvider: CloudProviderId,
@@ -1678,6 +1766,7 @@ export function CloudProvider({ children }: { children: ReactNode }) {
             );
           }
           updateUploadMetrics(manager);
+          warmUploadSessions(manager);
         };
 
         if (task.file.size === 0) {
@@ -2013,9 +2102,11 @@ export function CloudProvider({ children }: { children: ReactNode }) {
       throw new Error("Only JPG, PNG and WEBP conversions are supported");
     }
 
-    const response = await fetch(
-      `/api/cloud/${targetProvider}/open?fileId=${encodeURIComponent(sourceFile.id)}`
-    );
+    const sourceUrl =
+      sourceFile.previewUrl ||
+      sourceFile.directUrl ||
+      `/api/cloud/${targetProvider}/open?fileId=${encodeURIComponent(sourceFile.id)}`;
+    const response = await fetch(sourceUrl);
     if (!response.ok) {
       const data = await response.json().catch(() => null);
       throw new Error(data?.error || "Failed to read the source file");
@@ -2268,22 +2359,37 @@ export function CloudProvider({ children }: { children: ReactNode }) {
     );
     if (items.length === 0) return;
 
-    const folderCache = new Map<string, string>([["", targetFolderId]]);
-    const resolveTargetFolderId = async (folderSegments: string[]) => {
+    const folderCache = new Map<string, Promise<string>>([
+      ["", Promise.resolve(targetFolderId)],
+    ]);
+    const resolveTargetFolderId = async (
+      folderSegments: string[]
+    ): Promise<string> => {
       const cacheKey = folderSegments.join("/");
-      const cachedFolderId = folderCache.get(cacheKey);
-      if (cachedFolderId) {
-        return cachedFolderId;
+      const cachedFolderPromise = folderCache.get(cacheKey);
+      if (cachedFolderPromise) {
+        return cachedFolderPromise;
       }
 
-      const parentFolderId = await resolveTargetFolderId(folderSegments.slice(0, -1));
-      const nextFolderId = await ensureUploadFolderPath(
-        targetProvider,
-        parentFolderId,
-        folderSegments.slice(-1)
-      );
-      folderCache.set(cacheKey, nextFolderId);
-      return nextFolderId;
+      const nextFolderPromise = (async () => {
+        const parentFolderId = await resolveTargetFolderId(
+          folderSegments.slice(0, -1)
+        );
+        return ensureUploadFolderPath(
+          targetProvider,
+          parentFolderId,
+          folderSegments.slice(-1)
+        );
+      })();
+
+      folderCache.set(cacheKey, nextFolderPromise);
+
+      try {
+        return await nextFolderPromise;
+      } catch (error) {
+        folderCache.delete(cacheKey);
+        throw error;
+      }
     };
 
     const preparedItems = await Promise.all(
@@ -2368,6 +2474,7 @@ export function CloudProvider({ children }: { children: ReactNode }) {
       smoothedSpeed: 0,
       maxParallelUploads: uploadTuning.maxParallelUploads,
       sessionPrewarmLimit: uploadTuning.sessionPrewarmLimit,
+      sessionBatchSize: uploadTuning.sessionBatchSize,
     };
 
     setError(null);
@@ -2478,6 +2585,11 @@ export function CloudProvider({ children }: { children: ReactNode }) {
     }
 
     if (target) {
+      const fileSize = Number(target.size) || 0;
+      if (!target.isFolder && fileSize > MAX_PREVIEW_SIZE) {
+        alert("This file is too large to preview in the browser. Please download it to view it locally.");
+        return;
+      }
       setPreviewFile(target);
     }
   };

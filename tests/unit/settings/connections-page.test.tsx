@@ -256,4 +256,38 @@ describe("CloudConnectionsPage", () => {
       screen.getByRole("progressbar", { name: /user@gmail.com storage usage/i })
     ).toHaveAttribute("aria-valuenow", "40");
   });
+
+  it("shows OneDrive as coming soon with a disabled action", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        providers: {
+          google: {
+            connected: false,
+            email: null,
+            connectedAt: null,
+            accountCount: 0,
+            limit: 5,
+            remainingSlots: 5,
+            accounts: [],
+          },
+          onedrive: {
+            connected: false,
+            email: null,
+            connectedAt: null,
+            accountCount: 0,
+            limit: 5,
+            remainingSlots: 5,
+            storage: null,
+            accounts: [],
+          },
+        },
+      }),
+    });
+
+    render(<CloudConnectionsPage />);
+
+    expect(await screen.findByRole("heading", { name: /onedrive/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /coming soon/i })).toBeDisabled();
+  });
 });

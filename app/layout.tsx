@@ -1,4 +1,5 @@
 import { Outfit, DM_Sans } from "next/font/google";
+import CloudPreviewServiceWorker from "@/components/cloud/CloudPreviewServiceWorker";
 import ThemeScript from "@/components/theme/ThemeScript";
 import "./globals.css";
 
@@ -33,6 +34,7 @@ export default function RootLayout({
     >
       <body className="min-h-screen bg-background font-sans text-foreground antialiased selection:bg-blue-500/30">
         <ThemeScript />
+        <CloudPreviewServiceWorker />
         {children}
       </body>
     </html>

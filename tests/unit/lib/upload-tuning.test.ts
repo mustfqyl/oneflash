@@ -14,6 +14,7 @@ describe("getUploadTuning", () => {
       onedriveChunkSize: 320 * 1024 * 160,
       maxParallelUploads: 6,
       sessionPrewarmLimit: 8,
+      sessionBatchSize: 8,
     });
   });
 
@@ -29,6 +30,7 @@ describe("getUploadTuning", () => {
       onedriveChunkSize: 320 * 1024 * 64,
       maxParallelUploads: 3,
       sessionPrewarmLimit: 5,
+      sessionBatchSize: 5,
     });
   });
 
@@ -44,6 +46,23 @@ describe("getUploadTuning", () => {
       onedriveChunkSize: 320 * 1024 * 160,
       maxParallelUploads: 1,
       sessionPrewarmLimit: 1,
+      sessionBatchSize: 1,
+    });
+  });
+
+  it("keeps a deeper warmed session buffer for large fast queues", () => {
+    expect(
+      getUploadTuning(32, {
+        effectiveType: "4g",
+        downlinkMbps: 120,
+        hardwareConcurrency: 12,
+      })
+    ).toEqual({
+      googleChunkSize: 64 * 1024 * 1024,
+      onedriveChunkSize: 320 * 1024 * 160,
+      maxParallelUploads: 6,
+      sessionPrewarmLimit: 12,
+      sessionBatchSize: 12,
     });
   });
 });

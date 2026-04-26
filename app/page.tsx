@@ -3,11 +3,13 @@ import { redirect } from "next/navigation";
 import { ArrowRightIcon } from "@heroicons/react/24/outline";
 import PinScreenWrapper from "./(dashboard)/PinScreenWrapper";
 import { resolveServerAccess } from "@/lib/auth";
+import { getRootDomain } from "@/lib/subdomain";
 
 export default async function LandingPage() {
   const { access, subdomain } = await resolveServerAccess({
     allowTrustedDevice: true,
   });
+  const rootDomain = getRootDomain();
 
   if (subdomain) {
     if (access) {
@@ -16,7 +18,7 @@ export default async function LandingPage() {
 
     return (
       <main className="min-h-screen bg-background">
-        <PinScreenWrapper subdomain={subdomain} />
+        <PinScreenWrapper subdomain={subdomain} rootDomain={rootDomain} />
       </main>
     );
   }
@@ -44,10 +46,13 @@ export default async function LandingPage() {
       </header>
 
       <main className="relative z-10 -mt-20 flex flex-1 flex-col items-center justify-center px-6 text-center">
-        <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-border-strong bg-surface px-4 py-2 text-sm font-medium text-blue-500 motion-enter motion-enter-delay-1">
+        <Link
+          href="/what-is-this"
+          className="mb-8 inline-flex items-center gap-2 rounded-full border border-border-strong bg-surface px-4 py-2 text-sm font-medium text-blue-500 transition-colors hover:border-blue-500/40 hover:text-blue-400 motion-enter motion-enter-delay-1"
+        >
           <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-          The future of cloud storage
-        </div>
+          The Future Of Flash Drives
+        </Link>
         
         <h1 className="mb-8 max-w-5xl font-outfit text-5xl font-[800] leading-tight tracking-tight motion-enter motion-enter-delay-2 md:text-7xl lg:text-8xl">
           Your cloud drives.
@@ -58,7 +63,7 @@ export default async function LandingPage() {
         </h1>
         
         <p className="mb-12 max-w-2xl text-xl font-medium text-muted-foreground motion-enter motion-enter-delay-3">
-          Connect Google Drive and OneDrive. Access them from your personal PIN-protected subdomain with a beautiful interface.
+          Connect your cloud storage accounts. Access them from your personal PIN-protected subdomain with a beautiful interface.
         </p>
 
         <div className="flex flex-col items-center gap-4 motion-enter motion-enter-delay-4 sm:flex-row">
@@ -69,8 +74,35 @@ export default async function LandingPage() {
         </div>
       </main>
 
-      <footer className="relative z-10 py-8 text-center text-sm font-medium text-muted motion-enter motion-enter-delay-4">
-        © {new Date().getFullYear()} oneflash.one. Designed for the modern web.
+      <footer className="relative z-10 border-t border-white/6 py-8 motion-enter motion-enter-delay-4">
+        <div className="mx-auto flex w-full max-w-7xl flex-col items-center justify-between gap-3 px-6 text-center text-sm font-medium text-muted sm:flex-row sm:text-left lg:px-8">
+          <p>© {new Date().getFullYear()} {rootDomain}. Designed for the modern web.</p>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/privacy"
+              prefetch={false}
+              className="text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Privacy Policy
+            </Link>
+            <span className="h-1 w-1 rounded-full bg-border-strong" />
+            <Link
+              href="/terms"
+              prefetch={false}
+              className="text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Terms of Service
+            </Link>
+            <span className="h-1 w-1 rounded-full bg-border-strong" />
+            <Link
+              href="/what-is-this"
+              prefetch={false}
+              className="text-muted-foreground transition-colors hover:text-foreground"
+            >
+              What Is This?
+            </Link>
+          </div>
+        </div>
       </footer>
     </div>
   );

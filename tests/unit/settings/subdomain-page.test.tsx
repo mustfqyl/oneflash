@@ -1,9 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import DomainPage from "@/app/settings/subdomain/page";
+import SubdomainSettingsClient from "@/app/settings/subdomain/SubdomainSettingsClient";
 
-describe("DomainPage", () => {
+describe("SubdomainSettingsClient", () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
@@ -13,14 +13,15 @@ describe("DomainPage", () => {
   it("loads the current subdomain and saves changes", async () => {
     fetchMock
       .mockResolvedValueOnce({
-        json: async () => ({ user: { username: "musti" } }),
+        ok: true,
+        json: async () => ({ user: { customDomain: "musti" } }),
       })
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({ subdomain: "newname" }),
       });
 
-    render(<DomainPage />);
+    render(<SubdomainSettingsClient rootDomain="example.com" />);
 
     expect(await screen.findByDisplayValue("musti")).toBeInTheDocument();
     await userEvent.clear(screen.getByDisplayValue("musti"));

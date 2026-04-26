@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -24,8 +24,14 @@ type ProviderLink = {
 
 export default function Sidebar({
   canAccessSettings = true,
+  mobileOpen = false,
+  onCloseMobile,
+  onNavigate,
 }: {
   canAccessSettings?: boolean;
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
+  onNavigate?: () => void;
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -42,12 +48,9 @@ export default function Sidebar({
   const [expandedProvider, setExpandedProvider] = useState<"google" | "onedrive" | null>(
     null
   );
-
-  useEffect(() => {
-    if (provider === "google" || provider === "onedrive") {
-      setExpandedProvider((prev) => prev ?? provider);
-    }
-  }, [provider]);
+  const activeExpandedProvider =
+    expandedProvider ??
+    (provider === "google" || provider === "onedrive" ? provider : null);
 
   const links = [
     connectedProviders.includes("google")
@@ -94,16 +97,34 @@ export default function Sidebar({
     if (pathname === "/files") {
       openLocationRoot(nextProvider, accountId);
       router.push(nextHref);
+      onNavigate?.();
       return;
     }
 
     router.push(nextHref);
+    onNavigate?.();
   };
 
   return (
     <>
-      <aside className="motion-enter motion-enter-delay-1 flex h-full w-full flex-col border-r border-border bg-sidebar pt-4 pb-4 sm:w-60">
+      <aside
+        className={`motion-enter motion-enter-delay-1 absolute inset-y-0 left-0 z-40 flex h-full w-[17rem] max-w-[85vw] flex-col border-r border-border bg-sidebar pb-4 pt-4 shadow-2xl transition-transform md:static md:w-60 md:max-w-none md:translate-x-0 md:shadow-none ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
         <div className="mb-8 px-5">
+          <div className="mb-4 flex items-center justify-between md:hidden">
+            <div className="text-xs font-bold uppercase tracking-wider text-muted">
+              Navigation
+            </div>
+            <button
+              type="button"
+              onClick={onCloseMobile}
+              className="rounded-md px-2 py-1 text-sm font-medium text-muted-foreground transition-colors hover:bg-hover hover:text-foreground"
+            >
+              Close
+            </button>
+          </div>
           <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-muted">
             Favorites
           </h2>
@@ -122,6 +143,7 @@ export default function Sidebar({
             </button>
             <Link
               href="/favorites"
+              onClick={onNavigate}
               className={`motion-nav-item flex items-center gap-3 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                 pathname === "/favorites"
                   ? "bg-blue-500 text-white"
@@ -141,7 +163,7 @@ export default function Sidebar({
           <div className="space-y-0.5">
             {links.map((link) => {
               const accounts = connectedAccountsByProvider[link.id];
-              const isExpanded = expandedProvider === link.id;
+              const isExpanded = activeExpandedProvider === link.id;
               const providerActive =
                 provider === link.id && currentLocationAccountId === null;
 
@@ -219,6 +241,7 @@ export default function Sidebar({
             {canAccessSettings ? (
               <Link
                 href="/settings"
+                onClick={onNavigate}
                 className="motion-nav-item flex items-center gap-3 rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-hover"
               >
                 <Cog6ToothIcon className="h-4 w-4 text-muted" />

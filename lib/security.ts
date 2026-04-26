@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
+import { getRootDomain } from "@/lib/subdomain";
 
 type HeaderValue = string | string[] | undefined;
 type HeaderSource = Headers | Record<string, HeaderValue>;
@@ -15,6 +16,19 @@ type RateLimitEntry = {
   resetAt: number;
 };
 
+type ConcurrencyConfig = {
+  key: string;
+  limit: number;
+};
+
+type ConcurrencyResult = {
+  allowed: boolean;
+  active: number;
+  limit: number;
+  retryAfterSeconds: number;
+  release: () => void;
+};
+
 type RateLimitResult = {
   allowed: boolean;
   limit: number;
@@ -24,6 +38,7 @@ type RateLimitResult = {
 };
 
 const RATE_LIMIT_STORE_KEY = Symbol.for("oneflash.rate-limit-store");
+const CONCURRENCY_STORE_KEY = Symbol.for("oneflash.concurrency-store");
 
 function getRateLimitStore() {
   const globalScope = globalThis as typeof globalThis & {
@@ -35,6 +50,18 @@ function getRateLimitStore() {
   }
 
   return globalScope[RATE_LIMIT_STORE_KEY];
+}
+
+function getConcurrencyStore() {
+  const globalScope = globalThis as typeof globalThis & {
+    [CONCURRENCY_STORE_KEY]?: Map<string, number>;
+  };
+
+  if (!globalScope[CONCURRENCY_STORE_KEY]) {
+    globalScope[CONCURRENCY_STORE_KEY] = new Map<string, number>();
+  }
+
+  return globalScope[CONCURRENCY_STORE_KEY];
 }
 
 export function getHeaderValue(headersSource: HeaderSource, name: string) {
@@ -53,11 +80,20 @@ export function getHeaderValue(headersSource: HeaderSource, name: string) {
 }
 
 export function getClientIp(headersSource: HeaderSource) {
+  const cloudflareIp = getHeaderValue(headersSource, "cf-connecting-ip");
   const forwardedFor = getHeaderValue(headersSource, "x-forwarded-for");
+  const forwarded = getHeaderValue(headersSource, "forwarded");
   const realIp = getHeaderValue(headersSource, "x-real-ip");
 
   return (
+    cloudflareIp?.trim() ||
     forwardedFor?.split(",")[0]?.trim() ||
+    forwarded
+      ?.split(";")
+      .find((part) => part.trim().toLowerCase().startsWith("for="))
+      ?.split("=")[1]
+      ?.replace(/^"|"$/g, "")
+      ?.trim() ||
     realIp?.trim() ||
     "unknown"
   );
@@ -153,6 +189,64 @@ export function createRateLimitResponse(
   );
 }
 
+export function acquireConcurrencySlot({
+  key,
+  limit,
+}: ConcurrencyConfig): ConcurrencyResult {
+  const store = getConcurrencyStore();
+  const active = store.get(key) ?? 0;
+
+  if (active >= limit) {
+    return {
+      allowed: false,
+      active,
+      limit,
+      retryAfterSeconds: 1,
+      release: () => {},
+    };
+  }
+
+  const nextActive = active + 1;
+  store.set(key, nextActive);
+
+  let released = false;
+
+  return {
+    allowed: true,
+    active: nextActive,
+    limit,
+    retryAfterSeconds: 0,
+    release: () => {
+      if (released) {
+        return;
+      }
+
+      released = true;
+      const current = store.get(key) ?? 0;
+      if (current <= 1) {
+        store.delete(key);
+      } else {
+        store.set(key, current - 1);
+      }
+    },
+  };
+}
+
+export function createBusyResponse(
+  message = "Server is busy handling other file transfers. Please retry shortly.",
+  retryAfterSeconds = 1
+) {
+  const response = NextResponse.json(
+    {
+      error: message,
+      retryAfterSeconds,
+    },
+    { status: 503 }
+  );
+  response.headers.set("Retry-After", String(retryAfterSeconds));
+  return response;
+}
+
 function resolveCandidateOrigin(req: NextRequest) {
   const originHeader = req.headers.get("origin");
   if (originHeader) {
@@ -208,7 +302,7 @@ export function ensureTrustedOrigin(
       return null;
     }
 
-    const rootDomain = process.env.NEXT_PUBLIC_ROOT_DOMAIN || process.env.ROOT_DOMAIN;
+    const rootDomain = getRootDomain();
     if (rootDomain && (hostname === rootDomain || hostname.endsWith(`.${rootDomain}`))) {
       return null;
     }

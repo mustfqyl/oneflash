@@ -32,7 +32,7 @@ describe("SecurityPage", () => {
 
     const inputs = screen.getAllByPlaceholderText("******");
     await userEvent.type(inputs[0]!, "123456");
-    await userEvent.type(inputs[1]!, "654321");
+    await userEvent.type(inputs[1]!, "123456");
     fireEvent.submit(screen.getByRole("button", { name: /update pin/i }).closest("form")!);
 
     await waitFor(() =>

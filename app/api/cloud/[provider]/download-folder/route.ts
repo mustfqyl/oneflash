@@ -8,20 +8,29 @@ import {
   resolveCloudAccount,
 } from "@/lib/cloud-accounts";
 import {
-  type DriveFile,
   downloadGoogleDriveFile,
   exportGoogleDriveFile,
   listGoogleDriveFiles,
 } from "@/lib/google-drive";
 import {
-  type OneDriveItem,
   downloadOneDriveFile,
   listOneDriveFiles,
 } from "@/lib/onedrive";
+import {
+  acquireConcurrencySlot,
+  checkRateLimit,
+  createBusyResponse,
+  createRateLimitResponse,
+  getClientIp,
+} from "@/lib/security";
 
 export const runtime = "nodejs";
 
 const GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+const MAX_FOLDER_DOWNLOAD_FILES = 200;
+const MAX_FOLDER_DOWNLOAD_TOTAL_KNOWN_BYTES = 256 * 1024 * 1024;
+const FOLDER_DOWNLOAD_LIMIT_ERROR =
+  "Folder download limit exceeded. Download smaller batches to protect server capacity.";
 const GOOGLE_EXPORT_FORMATS: Record<
   string,
   { mimeType: string; extension: string }
@@ -65,6 +74,41 @@ function ensureExtension(name: string, extension: string) {
     : `${name}.${extension}`;
 }
 
+type FolderDownloadBudget = {
+  fileCount: number;
+  totalKnownBytes: number;
+};
+
+function parseKnownSize(value: string | number | undefined) {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return 0;
+}
+
+function consumeFolderDownloadBudget(
+  budget: FolderDownloadBudget,
+  knownSize: string | number | undefined
+) {
+  budget.fileCount += 1;
+  budget.totalKnownBytes += parseKnownSize(knownSize);
+
+  if (
+    budget.fileCount > MAX_FOLDER_DOWNLOAD_FILES ||
+    budget.totalKnownBytes > MAX_FOLDER_DOWNLOAD_TOTAL_KNOWN_BYTES
+  ) {
+    throw new Error(FOLDER_DOWNLOAD_LIMIT_ERROR);
+  }
+}
+
 async function readResponseBytes(response: Response) {
   return new Uint8Array(await response.arrayBuffer());
 }
@@ -73,12 +117,14 @@ async function addGoogleFolderToZip({
   accessToken,
   folderId,
   folderPath,
+  budget,
   zipEntries,
   errors,
 }: {
   accessToken: string;
   folderId: string;
   folderPath: string;
+  budget: FolderDownloadBudget;
   zipEntries: Record<string, Uint8Array>;
   errors: string[];
 }) {
@@ -92,6 +138,7 @@ async function addGoogleFolderToZip({
         accessToken,
         folderId: child.id,
         folderPath: childPath,
+        budget,
         zipEntries,
         errors,
       });
@@ -99,6 +146,7 @@ async function addGoogleFolderToZip({
     }
 
     try {
+      consumeFolderDownloadBudget(budget, child.size);
       if (child.mimeType.startsWith("application/vnd.google-apps.")) {
         const exportFormat = GOOGLE_EXPORT_FORMATS[child.mimeType];
         if (!exportFormat) {
@@ -130,6 +178,9 @@ async function addGoogleFolderToZip({
 
       zipEntries[childPath] = await readResponseBytes(downloaded);
     } catch (error) {
+      if (error instanceof Error && error.message === FOLDER_DOWNLOAD_LIMIT_ERROR) {
+        throw error;
+      }
       errors.push(
         `${childPath}: ${error instanceof Error ? error.message : "download failed"}`
       );
@@ -141,12 +192,14 @@ async function addOneDriveFolderToZip({
   accessToken,
   folderId,
   folderPath,
+  budget,
   zipEntries,
   errors,
 }: {
   accessToken: string;
   folderId: string;
   folderPath: string;
+  budget: FolderDownloadBudget;
   zipEntries: Record<string, Uint8Array>;
   errors: string[];
 }) {
@@ -160,6 +213,7 @@ async function addOneDriveFolderToZip({
         accessToken,
         folderId: child.id,
         folderPath: childPath,
+        budget,
         zipEntries,
         errors,
       });
@@ -167,6 +221,7 @@ async function addOneDriveFolderToZip({
     }
 
     try {
+      consumeFolderDownloadBudget(budget, child.size);
       const downloaded = await downloadOneDriveFile(accessToken, child.id);
       if (!downloaded.ok) {
         errors.push(`${childPath}: download failed (${downloaded.status})`);
@@ -175,6 +230,9 @@ async function addOneDriveFolderToZip({
 
       zipEntries[childPath] = await readResponseBytes(downloaded);
     } catch (error) {
+      if (error instanceof Error && error.message === FOLDER_DOWNLOAD_LIMIT_ERROR) {
+        throw error;
+      }
       errors.push(
         `${childPath}: ${error instanceof Error ? error.message : "download failed"}`
       );
@@ -186,12 +244,39 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ provider: string }> }
 ) {
+  let downloadLease:
+    | ReturnType<typeof acquireConcurrencySlot>
+    | null = null;
+
   try {
     const { access } = await resolveRequestAccess(req, {
       allowTrustedDevice: true,
     });
     if (!access) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const rateLimit = checkRateLimit({
+      key: `cloud-folder-download:${access.user.id}:${getClientIp(req.headers)}`,
+      limit: 4,
+      windowMs: 10 * 60 * 1000,
+    });
+    if (!rateLimit.allowed) {
+      return createRateLimitResponse(
+        rateLimit,
+        "Too many folder download requests. Please wait before trying again."
+      );
+    }
+
+    downloadLease = acquireConcurrencySlot({
+      key: "cloud-folder-download",
+      limit: 2,
+    });
+    if (!downloadLease.allowed) {
+      return createBusyResponse(
+        "This server is already building other folder downloads. Please retry shortly.",
+        downloadLease.retryAfterSeconds
+      );
     }
 
     const { provider } = await params;
@@ -217,6 +302,10 @@ export async function GET(
 
     const zipEntries: Record<string, Uint8Array> = {};
     const errors: string[] = [];
+    const budget: FolderDownloadBudget = {
+      fileCount: 0,
+      totalKnownBytes: 0,
+    };
 
     if (provider === "google") {
       const { account } = await resolveCloudAccount(
@@ -233,6 +322,7 @@ export async function GET(
         accessToken,
         folderId: remoteFolderId,
         folderPath: folderName,
+        budget,
         zipEntries,
         errors,
       });
@@ -251,6 +341,7 @@ export async function GET(
         accessToken,
         folderId: remoteFolderId,
         folderPath: folderName,
+        budget,
         zipEntries,
         errors,
       });
@@ -290,7 +381,16 @@ export async function GET(
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
+    if (
+      error instanceof Error &&
+      error.message === FOLDER_DOWNLOAD_LIMIT_ERROR
+    ) {
+      return NextResponse.json({ error: error.message }, { status: 413 });
+    }
+
     console.error("Download folder error:", error);
     return NextResponse.json({ error: "Server error" }, { status: 500 });
+  } finally {
+    downloadLease?.release();
   }
 }

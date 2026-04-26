@@ -40,7 +40,7 @@ describe("LoginPage", () => {
     await userEvent.type(screen.getByLabelText(/password/i), "wrong");
     fireEvent.submit(screen.getByRole("button", { name: /sign in/i }).closest("form")!);
 
-    expect(await screen.findByText(/invalid email or password/i)).toBeInTheDocument();
+    expect(await screen.findByText(/invalid email\/username or password/i)).toBeInTheDocument();
     expect(routerPush).not.toHaveBeenCalled();
   });
 

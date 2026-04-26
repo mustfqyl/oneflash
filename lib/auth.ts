@@ -4,6 +4,7 @@ import { cookies, headers } from "next/headers";
 import { getServerSession, type NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
+import { createHash } from "crypto";
 import { isRetriableDatabaseError, withDatabaseRetry } from "@/lib/database";
 import { prisma } from "@/lib/prisma";
 import { getSubdomainFromHost } from "@/lib/subdomain";
@@ -31,6 +32,12 @@ export type AccessContext = {
   subdomain: string | null;
   user: SessionBackedUser;
 };
+
+const TRUSTED_DEVICE_COOKIE_NAME = "trusted_device";
+
+function hashTrustedDeviceToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -191,17 +198,24 @@ async function getTrustedDeviceUser(subdomain: string | null, cookieStore: Cooki
     return null;
   }
 
-  const trustedDeviceToken = cookieStore.get("trusted_device")?.value;
+  const trustedDeviceToken = cookieStore.get(TRUSTED_DEVICE_COOKIE_NAME)?.value;
   if (!trustedDeviceToken) {
     return null;
   }
+
+  const trustedDeviceTokenHash = hashTrustedDeviceToken(trustedDeviceToken);
 
   let device;
 
   try {
     device = await withDatabaseRetry(() =>
-      prisma.trustedDevice.findUnique({
-        where: { token: trustedDeviceToken },
+      prisma.trustedDevice.findFirst({
+        where: {
+          OR: [
+            { token: trustedDeviceTokenHash },
+            { token: trustedDeviceToken },
+          ],
+        },
         include: {
           user: {
             select: {
@@ -225,6 +239,15 @@ async function getTrustedDeviceUser(subdomain: string | null, cookieStore: Cooki
 
   if (!device) {
     return null;
+  }
+
+  if (device.token !== trustedDeviceTokenHash) {
+    await prisma.trustedDevice
+      .update({
+        where: { id: device.id },
+        data: { token: trustedDeviceTokenHash },
+      })
+      .catch(() => undefined);
   }
 
   if (device.expiresAt <= new Date()) {
@@ -308,13 +331,20 @@ export async function revokeTrustedDeviceToken(token: string | undefined) {
     return;
   }
 
+  const trustedDeviceTokenHash = hashTrustedDeviceToken(token);
+
   await prisma.trustedDevice.deleteMany({
-    where: { token },
+    where: {
+      OR: [
+        { token: trustedDeviceTokenHash },
+        { token },
+      ],
+    },
   });
 }
 
 export function clearTrustedDeviceCookie(response: NextResponse) {
-  response.cookies.set("trusted_device", "", {
+  response.cookies.set(TRUSTED_DEVICE_COOKIE_NAME, "", {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",

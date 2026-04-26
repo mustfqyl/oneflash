@@ -1,5 +1,6 @@
 import {
   getSubdomainFromHost,
+  getSubdomainUrl,
   getSubdomainValidationError,
 } from "@/lib/subdomain";
 
@@ -13,5 +14,10 @@ describe("subdomain utilities", () => {
     expect(getSubdomainFromHost("musti.oneflash.one")).toBe("musti");
     expect(getSubdomainFromHost("www.oneflash.one")).toBeNull();
     expect(getSubdomainFromHost("musti.vercel.app")).toBeNull();
+  });
+
+  it("builds subdomain URLs for both local and production roots", () => {
+    expect(getSubdomainUrl("musti", "example.com")).toBe("https://musti.example.com");
+    expect(getSubdomainUrl("musti", "lvh.me")).toBe("http://musti.lvh.me:3000");
   });
 });

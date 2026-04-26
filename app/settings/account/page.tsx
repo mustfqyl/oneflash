@@ -3,8 +3,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
   AtSymbolIcon,
-  GlobeAltIcon,
-  KeyIcon,
   ShieldCheckIcon,
 } from "@heroicons/react/24/outline";
 import { getPasswordValidationError } from "@/lib/validation";
@@ -41,7 +39,6 @@ export default function AccountPage() {
   };
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadMe().catch((err: Error) => setError(err.message));
   }, []);
 
@@ -230,7 +227,10 @@ export default function AccountPage() {
                 </label>
               </div>
 
-              <div className="flex flex-col gap-4 rounded-2xl border border-border bg-background/30 p-4 sm:flex-row sm:items-center sm:justify-end">
+              <div className="flex flex-col gap-4 rounded-2xl border border-border bg-background/30 p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="max-w-md text-sm text-muted-foreground">
+                  Saving here updates both your sign-in username and public oneflash address.
+                </div>
                 <button
                   type="submit"
                   disabled={profileSaving}

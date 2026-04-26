@@ -191,6 +191,80 @@ export interface DriveFile {
   parents?: string[];
   iconLink?: string;
   webViewLink?: string;
+  webContentLink?: string;
+  exportLinks?: Record<string, string>;
+}
+
+export const GOOGLE_PREVIEW_EXPORTS: Record<
+  string,
+  { mimeType: string; extension: string }
+> = {
+  "application/vnd.google-apps.document": {
+    mimeType: "application/pdf",
+    extension: "pdf",
+  },
+  "application/vnd.google-apps.spreadsheet": {
+    mimeType: "application/pdf",
+    extension: "pdf",
+  },
+  "application/vnd.google-apps.presentation": {
+    mimeType: "application/pdf",
+    extension: "pdf",
+  },
+  "application/vnd.google-apps.drawing": {
+    mimeType: "application/pdf",
+    extension: "pdf",
+  },
+};
+
+export const GOOGLE_DOWNLOAD_EXPORTS: Record<
+  string,
+  { mimeType: string; extension: string }
+> = {
+  "application/vnd.google-apps.document": {
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    extension: "docx",
+  },
+  "application/vnd.google-apps.spreadsheet": {
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    extension: "xlsx",
+  },
+  "application/vnd.google-apps.presentation": {
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    extension: "pptx",
+  },
+  "application/vnd.google-apps.drawing": {
+    mimeType: "application/pdf",
+    extension: "pdf",
+  },
+};
+
+function isGoogleWorkspaceMimeType(mimeType: string) {
+  return mimeType.startsWith("application/vnd.google-apps.");
+}
+
+export function getGoogleDriveDirectUrl(
+  file: Pick<DriveFile, "mimeType" | "webContentLink">
+) {
+  if (isGoogleWorkspaceMimeType(file.mimeType)) {
+    return null;
+  }
+
+  return file.webContentLink || null;
+}
+
+export function getGoogleDriveBrowserOpenUrl(
+  file: Pick<DriveFile, "webContentLink" | "exportLinks">,
+  targetMimeType?: string | null
+) {
+  if (targetMimeType) {
+    return file.exportLinks?.[targetMimeType] || null;
+  }
+
+  return file.webContentLink || null;
 }
 
 export async function listGoogleDriveFiles(
@@ -204,7 +278,7 @@ export async function listGoogleDriveFiles(
   const params = new URLSearchParams({
     q,
     fields:
-      "files(id,name,mimeType,size,modifiedTime,parents,iconLink,webViewLink)",
+      "files(id,name,mimeType,size,modifiedTime,parents,iconLink,webViewLink,webContentLink,exportLinks)",
     orderBy: "folder,name",
     pageSize: "100",
   });
@@ -214,6 +288,26 @@ export async function listGoogleDriveFiles(
   });
   const data = await res.json();
   return data.files || [];
+}
+
+export async function getGoogleDriveFileMetadata(
+  accessToken: string,
+  fileId: string
+): Promise<DriveFile> {
+  const params = new URLSearchParams({
+    fields:
+      "id,name,mimeType,size,modifiedTime,parents,iconLink,webViewLink,webContentLink,exportLinks",
+  });
+
+  const res = await fetch(`${GOOGLE_API_BASE}/files/${fileId}?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!res.ok) {
+    throw new Error((await res.text()) || "Failed to load Google Drive file metadata");
+  }
+
+  return (await res.json()) as DriveFile;
 }
 
 export async function uploadToGoogleDrive(

@@ -48,6 +48,41 @@ const PROVIDER_META: Record<
   },
 };
 
+function renderComingSoonCard({
+  cardKey,
+  title,
+  initials,
+  buttonLabel,
+}: {
+  cardKey: string;
+  title: string;
+  initials: string;
+  buttonLabel: string;
+}) {
+  return (
+    <div
+      key={cardKey}
+      className="flex items-center justify-between rounded-xl border border-border-strong bg-surface-soft p-4 opacity-60 grayscale"
+    >
+      <div className="flex items-center gap-4">
+        <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-input-soft p-2 font-bold text-muted-foreground">
+          {initials}
+        </div>
+        <div>
+          <h3 className="font-semibold text-lg">{title}</h3>
+          <p className="text-sm text-muted">Coming soon...</p>
+        </div>
+      </div>
+      <button
+        disabled
+        className="cursor-not-allowed rounded-lg bg-input-soft px-4 py-2 font-semibold text-muted"
+      >
+        {buttonLabel}
+      </button>
+    </div>
+  );
+}
+
 function formatBytes(bytes: number | null): string {
   if (bytes === null || !Number.isFinite(bytes)) {
     return "Unavailable";
@@ -145,6 +180,15 @@ export default function CloudConnectionsPage() {
     const provider = connections?.[providerKey];
     const meta = PROVIDER_META[providerKey];
     const canConnectMore = !provider || provider.accountCount < provider.limit;
+
+    if (providerKey === "onedrive") {
+      return renderComingSoonCard({
+        cardKey: providerKey,
+        title: meta.title,
+        initials: meta.initials,
+        buttonLabel: "Connect",
+      });
+    }
 
     if (pageLoading) {
       return (
@@ -291,24 +335,12 @@ export default function CloudConnectionsPage() {
       <div className="space-y-4 motion-stagger-children">
         {renderProviderCard("google")}
         {renderProviderCard("onedrive")}
-
-        <div className="flex items-center justify-between rounded-xl border border-border-strong bg-surface-soft p-4 opacity-60 grayscale">
-          <div className="flex items-center gap-4">
-            <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-input-soft p-2 font-bold text-muted-foreground">
-              iC
-            </div>
-            <div>
-              <h3 className="font-semibold text-lg">iCloud</h3>
-              <p className="text-sm text-muted">Coming soon...</p>
-            </div>
-          </div>
-          <button
-            disabled
-            className="cursor-not-allowed rounded-lg bg-input-soft px-4 py-2 font-semibold text-muted"
-          >
-            Connect
-          </button>
-        </div>
+        {renderComingSoonCard({
+          cardKey: "icloud",
+          title: "iCloud",
+          initials: "iC",
+          buttonLabel: "Connect",
+        })}
       </div>
     </div>
   );

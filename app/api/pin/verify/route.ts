@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { verifyPin, checkLockout, recordFailedAttempt, resetLockout } from "@/lib/pin";
 import { getGeoFromIP } from "@/lib/geo";
 import { sendLoginNotification } from "@/lib/email";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import {
   checkRateLimit,
   createRateLimitResponse,
@@ -12,6 +12,10 @@ import {
 } from "@/lib/security";
 import { isValidSixDigitPin } from "@/lib/validation";
 import { normalizeSubdomain } from "@/lib/subdomain";
+
+function hashTrustedDeviceToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -90,12 +94,9 @@ export async function POST(req: NextRequest) {
     resetLockout(user.id);
 
     // Get IP and geo
-    const ip =
-      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-      req.headers.get("x-real-ip") ||
-      "unknown";
+    const ip = getClientIp(req.headers);
     const device = req.headers.get("user-agent") || "Unknown";
-    const geo = await getGeoFromIP(ip);
+    const geo = await getGeoFromIP(ip, req.headers);
 
     // Log access
     await prisma.accessLog.create({
@@ -128,7 +129,7 @@ export async function POST(req: NextRequest) {
     await prisma.trustedDevice.create({
       data: {
         userId: user.id,
-        token,
+        token: hashTrustedDeviceToken(token),
         deviceName: device,
         expiresAt,
       },

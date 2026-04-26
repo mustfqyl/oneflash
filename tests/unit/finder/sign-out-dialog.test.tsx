@@ -40,7 +40,7 @@ describe("SignOutDialog", () => {
     global.fetch = vi.fn().mockResolvedValue({ ok: true } as Response);
   });
 
-  it("shows immediate loading feedback and redirects to login after sign out", async () => {
+  it("shows immediate loading feedback and redirects to the home page after sign out", async () => {
     let resolveSignOut: (() => void) | undefined;
 
     signOutMock.mockImplementation(
@@ -61,7 +61,7 @@ describe("SignOutDialog", () => {
     resolveSignOut?.();
 
     await waitFor(() => {
-      expect(replaceMock).toHaveBeenCalledWith("/login");
+      expect(replaceMock).toHaveBeenCalledWith("/");
     });
   });
 });
