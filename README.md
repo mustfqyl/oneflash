@@ -47,16 +47,16 @@ chmod +x install.sh
 
 What the installer does:
 
-- asks for the root domain, admin emails, database mode, Cloudflare token, and optional integrations that are actually enabled in the app
+- asks for the root domain, admin emails, database mode, and optional integrations that are actually enabled in the app
 - generates production env files under `deploy/runtime/`
-- creates or updates the apex and wildcard DNS records in Cloudflare
 - provisions Docker if needed
-- boots Traefik with automatic Let's Encrypt wildcard TLS
+- boots Traefik with automatic Let's Encrypt TLS
 - bootstraps Prisma schema and starts the app stack
 
 Notes:
 
-- The fully automatic flow assumes the domain is managed in Cloudflare because the app needs `*.root-domain` routing plus wildcard TLS.
+- Before running the installer, create two DNS A records manually: `@ -> VPS_IP` and `* -> VPS_IP`.
+- Port `80` and `443` must be reachable from the internet so Let's Encrypt HTTP validation can complete.
 - If `prisma/migrations/` is empty, the installer uses `prisma db push --skip-generate` for first-time schema bootstrap.
 
 Runtime behavior:
