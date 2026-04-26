@@ -30,12 +30,11 @@ Options:
 
 The fully automatic mode expects:
   - a Linux VPS (tested for Ubuntu/Debian automation)
-  - a root domain managed in Cloudflare
-  - a Cloudflare API token with Zone DNS Edit + Zone Read
+  - a root domain whose DNS A records already point to the VPS
 
-Important:
-  This app relies on root-domain + wildcard subdomain routing, so the script
-  configures both apex and wildcard DNS plus wildcard TLS.
+Before running:
+  - create an A record for @ pointing to the VPS public IPv4
+  - create an A record for * pointing to the VPS public IPv4
 EOF
 }
 
@@ -333,7 +332,6 @@ write_compose_env_file() {
   {
     write_dotenv_line ROOT_DOMAIN "$ROOT_DOMAIN"
     write_dotenv_line LETSENCRYPT_EMAIL "$LETSENCRYPT_EMAIL"
-    write_dotenv_line CF_DNS_API_TOKEN "$CF_DNS_API_TOKEN"
     write_dotenv_line POSTGRES_DB "$POSTGRES_DB"
     write_dotenv_line POSTGRES_USER "$POSTGRES_USER"
     write_dotenv_line POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
@@ -364,8 +362,8 @@ certificatesResolvers:
     acme:
       email: ${LETSENCRYPT_EMAIL}
       storage: /acme.json
-      dnsChallenge:
-        provider: cloudflare
+      httpChallenge:
+        entryPoint: web
 
 log:
   level: INFO
@@ -383,8 +381,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    environment:
-      CF_DNS_API_TOKEN: \${CF_DNS_API_TOKEN}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
@@ -478,8 +474,6 @@ EOF
       - traefik.http.routers.oneflash.entrypoints=websecure
       - traefik.http.routers.oneflash.tls=true
       - traefik.http.routers.oneflash.tls.certresolver=letsencrypt
-      - traefik.http.routers.oneflash.tls.domains[0].main=${ROOT_DOMAIN}
-      - traefik.http.routers.oneflash.tls.domains[0].sans=*.${ROOT_DOMAIN}
       - traefik.http.services.oneflash.loadbalancer.server.port=3000
 
 networks:
@@ -605,54 +599,6 @@ docker_inspect() {
   fi
 }
 
-cloudflare_api() {
-  local method="$1"
-  local endpoint="$2"
-  local data="${3-}"
-
-  if [ -n "$data" ]; then
-    curl -fsS -X "$method" \
-      -H "Authorization: Bearer $CF_DNS_API_TOKEN" \
-      -H "Content-Type: application/json" \
-      --data "$data" \
-      "https://api.cloudflare.com/client/v4/$endpoint"
-  else
-    curl -fsS -X "$method" \
-      -H "Authorization: Bearer $CF_DNS_API_TOKEN" \
-      -H "Content-Type: application/json" \
-      "https://api.cloudflare.com/client/v4/$endpoint"
-  fi
-}
-
-configure_cloudflare_dns() {
-  [ "$AUTO_CONFIGURE_DNS" = "yes" ] || return
-
-  log "Cloudflare DNS kayıtları güncelleniyor."
-
-  local zone_lookup zone_id proxied_json existing record_id payload
-  zone_lookup="$(cloudflare_api GET "zones?name=$CLOUDFLARE_ZONE&status=active")"
-  zone_id="$(printf '%s' "$zone_lookup" | jq -r '.result[0].id // empty')"
-  [ -n "$zone_id" ] || fail "Cloudflare zone bulunamadı: $CLOUDFLARE_ZONE"
-
-  if [ "$CLOUDFLARE_PROXIED" = "yes" ]; then
-    proxied_json=true
-  else
-    proxied_json=false
-  fi
-
-  for record_name in "$ROOT_DOMAIN" "*.$ROOT_DOMAIN"; do
-    existing="$(cloudflare_api GET "zones/$zone_id/dns_records?type=A&name=$record_name")"
-    record_id="$(printf '%s' "$existing" | jq -r '.result[0].id // empty')"
-    payload="$(jq -cn --arg type "A" --arg name "$record_name" --arg content "$VPS_PUBLIC_IP" --argjson proxied "$proxied_json" '{type:$type,name:$name,content:$content,ttl:1,proxied:$proxied}')"
-
-    if [ -n "$record_id" ]; then
-      cloudflare_api PUT "zones/$zone_id/dns_records/$record_id" "$payload" >/dev/null
-    else
-      cloudflare_api POST "zones/$zone_id/dns_records" "$payload" >/dev/null
-    fi
-  done
-}
-
 wait_for_service_health() {
   local service="$1"
   local timeout="${2:-180}"
@@ -761,28 +707,6 @@ collect_core_config() {
     warn "Geçerli bir email gir."
     LETSENCRYPT_EMAIL=""
   done
-
-  CLOUDFLARE_ZONE="${CLOUDFLARE_ZONE:-$ROOT_DOMAIN}"
-  while true; do
-    prompt_required CLOUDFLARE_ZONE "Cloudflare zone" "$CLOUDFLARE_ZONE"
-    CLOUDFLARE_ZONE="$(normalize_domain "$CLOUDFLARE_ZONE")"
-    if valid_domain "$CLOUDFLARE_ZONE"; then
-      break
-    fi
-    warn "Geçerli bir zone gir."
-    CLOUDFLARE_ZONE=""
-  done
-
-  prompt_yes_no AUTO_CONFIGURE_DNS "Cloudflare apex + wildcard DNS kayıtları script tarafından yazılsın mı?" "${AUTO_CONFIGURE_DNS:-yes}"
-  prompt_yes_no CLOUDFLARE_PROXIED "Cloudflare proxy açılsın mı?" "${CLOUDFLARE_PROXIED:-no}"
-
-  if [ "$WRITE_ONLY" -eq 0 ] && [ "$AUTO_CONFIGURE_DNS" = "yes" ]; then
-    VPS_PUBLIC_IP="${VPS_PUBLIC_IP:-$(detect_public_ipv4)}"
-    prompt_required VPS_PUBLIC_IP "VPS public IPv4" "$VPS_PUBLIC_IP"
-  fi
-
-  CF_DNS_API_TOKEN="${CF_DNS_API_TOKEN:-}"
-  prompt_secret CF_DNS_API_TOKEN "Cloudflare API token" "$CF_DNS_API_TOKEN"
 
   NEXTAUTH_URL="${NEXTAUTH_URL:-https://$ROOT_DOMAIN}"
   NEXTAUTH_URL="https://$ROOT_DOMAIN"
@@ -924,7 +848,6 @@ main() {
   install_docker_if_needed
   detect_docker_compose
   ensure_docker_daemon
-  configure_cloudflare_dns
   deploy_stack
   print_summary
 }
